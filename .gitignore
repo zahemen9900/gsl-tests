@@ -1,0 +1,188 @@
+# Compiled Python files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+
+# Translations
+*.mo
+*.pot
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Virtual environments
+.env
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Spyder
+.spyderproject
+.spyproject
+
+# Rope
+.ropeproject
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre
+.pyre/
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+media/
+
+# Flask instance folder
+instance/
+
+# Coverage and testing artifacts
+.coverage.*
+coverage.xml
+.cache/
+
+# Misc
+*.pid
+*.seed
+*.tgz
+*.log
+*.sql
+*.sqlite3
+*.bak
+*.swp
+
+runs/*
+sample_dataset/*
+features/*
+wrangler/*
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+.pnp/
+.pnp.js
+.pnp.cjs
+.pnp.loader.mjs
+.pnp.loader.cjs
+.lock-wscript
+.build/
+jspm_packages/
+bower_components/
+.npm/
+.nyc_output/
+coverage/
+*.tsbuildinfo
+*.tgz
+*.log
+
+# React / front-end frameworks
+# Create React App / Next / Gatsby / Nuxt / Vite / Parcel
+build/
+dist/
+.out/
+.next/
+.nuxt/
+.public/
+.cache/
+.parcel-cache/
+.cache-loader/
+.cache/
+.cache/vite/
+.storybook-static/
+.serverless/
+.vercel/
+.now/
+netlify.toml
+/.firebase/
+.sass-cache/
+
+# Environment files (sensitive)
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.*.local
+
+# Editor / tooling caches
+.eslintcache
+.idea/
+.vscode/
+*.sublime-workspace
+*.sublime-project
+
+# Misc
+/.expo/
+.DS_Store
