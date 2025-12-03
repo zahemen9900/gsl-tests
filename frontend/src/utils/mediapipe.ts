@@ -11,6 +11,156 @@ const RIGHT_SHOULDER = 12;
 const LEFT_HIP = 23;
 const RIGHT_HIP = 24;
 
+// MediaPipe pose connections for skeleton drawing
+const POSE_CONNECTIONS: [number, number][] = [
+    // Face
+    [0, 1], [1, 2], [2, 3], [3, 7], [0, 4], [4, 5], [5, 6], [6, 8],
+    // Torso
+    [9, 10], [11, 12], [11, 23], [12, 24], [23, 24],
+    // Left arm
+    [11, 13], [13, 15], [15, 17], [15, 19], [15, 21], [17, 19],
+    // Right arm
+    [12, 14], [14, 16], [16, 18], [16, 20], [16, 22], [18, 20],
+    // Left leg
+    [23, 25], [25, 27], [27, 29], [27, 31], [29, 31],
+    // Right leg
+    [24, 26], [26, 28], [28, 30], [28, 32], [30, 32],
+];
+
+// Hand connections
+const HAND_CONNECTIONS: [number, number][] = [
+    // Thumb
+    [0, 1], [1, 2], [2, 3], [3, 4],
+    // Index
+    [0, 5], [5, 6], [6, 7], [7, 8],
+    // Middle
+    [0, 9], [9, 10], [10, 11], [11, 12],
+    // Ring
+    [0, 13], [13, 14], [14, 15], [15, 16],
+    // Pinky
+    [0, 17], [17, 18], [18, 19], [19, 20],
+    // Palm
+    [5, 9], [9, 13], [13, 17],
+];
+
+// Colors for different body parts
+const COLORS = {
+    pose: { line: 'rgba(99, 102, 241, 0.8)', point: 'rgba(139, 92, 246, 1)' },
+    leftHand: { line: 'rgba(34, 197, 94, 0.8)', point: 'rgba(74, 222, 128, 1)' },
+    rightHand: { line: 'rgba(249, 115, 22, 0.8)', point: 'rgba(251, 146, 60, 1)' },
+    face: { line: 'rgba(236, 72, 153, 0.4)', point: 'rgba(244, 114, 182, 0.6)' },
+};
+
+/**
+ * Draw landmarks and skeleton connections on canvas
+ */
+export function drawLandmarks(
+    ctx: CanvasRenderingContext2D,
+    results: Results,
+    width: number,
+    height: number
+): void {
+    ctx.save();
+    // Mirror the canvas to match the mirrored webcam
+    ctx.translate(width, 0);
+    ctx.scale(-1, 1);
+
+    // Draw pose skeleton
+    if (results.poseLandmarks) {
+        drawConnections(ctx, results.poseLandmarks, POSE_CONNECTIONS, width, height, COLORS.pose.line, 3);
+        drawPoints(ctx, results.poseLandmarks, width, height, COLORS.pose.point, 6);
+    }
+
+    // Draw left hand
+    if (results.leftHandLandmarks) {
+        drawConnections(ctx, results.leftHandLandmarks, HAND_CONNECTIONS, width, height, COLORS.leftHand.line, 2);
+        drawPoints(ctx, results.leftHandLandmarks, width, height, COLORS.leftHand.point, 4);
+    }
+
+    // Draw right hand
+    if (results.rightHandLandmarks) {
+        drawConnections(ctx, results.rightHandLandmarks, HAND_CONNECTIONS, width, height, COLORS.rightHand.line, 2);
+        drawPoints(ctx, results.rightHandLandmarks, width, height, COLORS.rightHand.point, 4);
+    }
+
+    // Draw face mesh (simplified - only key points)
+    if (results.faceLandmarks) {
+        // Draw only key facial landmarks for better performance
+        const keyFaceIndices = [
+            // Eyes
+            33, 133, 362, 263,
+            // Eyebrows
+            70, 63, 105, 66, 107, 336, 296, 334, 293, 300,
+            // Nose
+            1, 4, 5, 195, 197,
+            // Mouth
+            61, 291, 0, 17, 78, 308,
+            // Face outline
+            10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109
+        ];
+        const keyLandmarks = keyFaceIndices.map(i => results.faceLandmarks![i]).filter(Boolean);
+        drawPoints(ctx, keyLandmarks, width, height, COLORS.face.point, 2);
+    }
+
+    ctx.restore();
+}
+
+function drawConnections(
+    ctx: CanvasRenderingContext2D,
+    landmarks: NormalizedLandmark[],
+    connections: [number, number][],
+    width: number,
+    height: number,
+    color: string,
+    lineWidth: number
+): void {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    for (const [start, end] of connections) {
+        const startLm = landmarks[start];
+        const endLm = landmarks[end];
+        if (!startLm || !endLm) continue;
+
+        // Skip low-visibility landmarks for cleaner visualization
+        const startVis = (startLm as any).visibility ?? 1;
+        const endVis = (endLm as any).visibility ?? 1;
+        if (startVis < 0.5 || endVis < 0.5) continue;
+
+        ctx.beginPath();
+        ctx.moveTo(startLm.x * width, startLm.y * height);
+        ctx.lineTo(endLm.x * width, endLm.y * height);
+        ctx.stroke();
+    }
+}
+
+function drawPoints(
+    ctx: CanvasRenderingContext2D,
+    landmarks: NormalizedLandmark[],
+    width: number,
+    height: number,
+    color: string,
+    radius: number
+): void {
+    ctx.fillStyle = color;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = radius;
+
+    for (const lm of landmarks) {
+        if (!lm) continue;
+        const vis = (lm as any).visibility ?? 1;
+        if (vis < 0.5) continue;
+
+        ctx.beginPath();
+        ctx.arc(lm.x * width, lm.y * height, radius, 0, 2 * Math.PI);
+        ctx.fill();
+    }
+
+    ctx.shadowBlur = 0;
+}
+
 function normalizeFrameLandmarks(feats: Float32Array): Float32Array {
     // feats is a flat array of 540 elements
     // Structure: Pose(132) | LeftHand(63) | RightHand(63) | Face(282)

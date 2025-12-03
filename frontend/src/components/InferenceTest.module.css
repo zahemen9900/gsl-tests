@@ -99,6 +99,7 @@
   gap: 1.5rem;
   padding: 1.5rem 2rem;
   flex: 1;
+  align-items: start;
 }
 
 /* Panels */
@@ -110,6 +111,12 @@
   display: flex;
   flex-direction: column;
   gap: 1rem;
+}
+
+/* Left panel fixed height constraint */
+.panel:first-child {
+  max-height: calc(100vh - 180px);
+  overflow: hidden;
 }
 
 .panelHeader {
@@ -249,7 +256,8 @@
   height: 100%;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 0.2s ease;
+  transition: opacity 0.3s ease;
+  z-index: 2;
 }
 
 .overlayVisible {
@@ -260,6 +268,49 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+/* Landmark Toggle Button */
+.landmarkToggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 20px;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.landmarkToggle:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: var(--text);
+}
+
+.landmarkToggle svg {
+  opacity: 0.7;
+  transition: opacity 0.2s ease;
+}
+
+.landmarkToggleActive {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.2) 0%, rgba(139, 92, 246, 0.2) 100%);
+  border-color: rgba(99, 102, 241, 0.4);
+  color: var(--primary-light);
+}
+
+.landmarkToggleActive svg {
+  opacity: 1;
+  stroke: var(--primary-light);
+}
+
+.landmarkToggleActive:hover {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.3) 0%, rgba(139, 92, 246, 0.3) 100%);
+  border-color: rgba(99, 102, 241, 0.5);
 }
 
 /* Countdown Overlay */

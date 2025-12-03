@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Webcam from 'react-webcam';
 import type { Holistic, Results } from '@mediapipe/holistic';
-import { extractFeatureVector, getHolisticInstance } from '../utils/mediapipe';
+import { extractFeatureVector, getHolisticInstance, drawLandmarks } from '../utils/mediapipe';
 import styles from './InferenceTest.module.css';
 
 interface SampleItem {
@@ -35,8 +35,10 @@ const InferenceTest: React.FC<InferenceTestProps> = ({ onBack }) => {
     const [streamingPrediction, setStreamingPrediction] = useState('');
     const [streamingStatus, setStreamingStatus] = useState<'idle' | 'processing' | 'error'>('idle');
     const [streamingHistory, setStreamingHistory] = useState<string[]>([]);
+    const [showLandmarks, setShowLandmarks] = useState(true);
     
     const webcamRef = useRef<Webcam>(null);
+    const canvasRef = useRef<HTMLCanvasElement>(null);
     const holisticRef = useRef<Holistic | null>(null);
     const requestRef = useRef<number>();
     const recordingStartRef = useRef<number>(0);
@@ -117,6 +119,21 @@ const InferenceTest: React.FC<InferenceTestProps> = ({ onBack }) => {
     }, []);
 
     const onResults = useCallback((results: Results) => {
+        // Draw landmarks overlay
+        if (canvasRef.current && webcamRef.current?.video) {
+            const video = webcamRef.current.video;
+            const canvas = canvasRef.current;
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                if (showLandmarks) {
+                    drawLandmarks(ctx, results, canvas.width, canvas.height);
+                }
+            }
+        }
+
         const features = extractFeatureVector(results);
         if (!features) return;
         const featureArray = Array.from(features);
@@ -132,7 +149,7 @@ const InferenceTest: React.FC<InferenceTestProps> = ({ onBack }) => {
             }
             void sendStreamingInference();
         }
-    }, [sendStreamingInference]);
+    }, [sendStreamingInference, showLandmarks]);
 
     useEffect(() => {
         let isMounted = true;
@@ -383,12 +400,29 @@ const InferenceTest: React.FC<InferenceTestProps> = ({ onBack }) => {
 
                 {/* Right Panel - Camera */}
                 <section className={styles.panel}>
-                    <div className={styles.panelHeader}>
-                        <div className={styles.panelIcon}>🎥</div>
-                        <div>
-                            <h2>Your Camera</h2>
-                            <p>Perform the sign yourself</p>
+                    <div className={`${styles.panelHeader} ${styles.panelHeaderWithAction}`}>
+                        <div className={styles.panelHeaderInfo}>
+                            <div className={styles.panelIcon}>🎥</div>
+                            <div>
+                                <h2>Your Camera</h2>
+                                <p>Perform the sign yourself</p>
+                            </div>
                         </div>
+                        <button
+                            className={`${styles.landmarkToggle} ${showLandmarks ? styles.landmarkToggleActive : ''}`}
+                            onClick={() => setShowLandmarks(prev => !prev)}
+                            title={showLandmarks ? 'Hide skeleton overlay' : 'Show skeleton overlay'}
+                        >
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <circle cx="12" cy="5" r="3"/>
+                                <line x1="12" y1="8" x2="12" y2="16"/>
+                                <line x1="12" y1="12" x2="8" y2="10"/>
+                                <line x1="12" y1="12" x2="16" y2="10"/>
+                                <line x1="12" y1="16" x2="9" y2="21"/>
+                                <line x1="12" y1="16" x2="15" y2="21"/>
+                            </svg>
+                            <span>{showLandmarks ? 'Skeleton On' : 'Skeleton Off'}</span>
+                        </button>
                     </div>
 
                     <div className={styles.cameraContainer}>
@@ -401,6 +435,10 @@ const InferenceTest: React.FC<InferenceTestProps> = ({ onBack }) => {
                                 height: 480,
                                 facingMode: "user"
                             }}
+                        />
+                        <canvas
+                            ref={canvasRef}
+                            className={`${styles.overlayCanvas} ${showLandmarks ? styles.overlayVisible : ''}`}
                         />
                         
                         {/* Countdown Overlay */}

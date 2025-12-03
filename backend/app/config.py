@@ -43,7 +43,7 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         base_dir = Path(os.getenv("BACKEND_BASE_DIR", Path(__file__).resolve().parent.parent)).resolve()
-        models_dir = Path(os.getenv("MODELS_DIR", base_dir.parent / "models")).resolve()
+        models_dir = Path(os.getenv("MODELS_DIR", base_dir.parent / "runs")).resolve()
         onnx_model = Path(os.getenv("ONNX_MODEL_PATH", models_dir / "sign_encoder.onnx")).resolve()
         embeddings_path = Path(os.getenv("EMBEDDINGS_PATH", models_dir / "embeddings.npy")).resolve()
         mapping_path = Path(os.getenv("MAPPING_PATH", models_dir / "embeddings_map.csv")).resolve()

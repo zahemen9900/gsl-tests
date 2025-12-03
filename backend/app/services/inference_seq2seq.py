@@ -13,10 +13,11 @@ CFG = {
     "seq_len": 64,
     "input_dim": 540,
     "proj_dim": 160,
-    "rnn_hidden": 160,
-    "rnn_layers": 2,
-    "attn_heads": 4,
     "embed_dim": 256,
+    "attn_heads": 4,
+    "encoder_layers": 4,
+    "encoder_ff_dim": 512,
+    "encoder_dropout": 0.1,
     "decoder_max_len": 64,
 }
 
@@ -79,10 +80,12 @@ class Seq2SeqInferenceService:
             input_dim=CFG["input_dim"],
             vocab_size=self.tokenizer.vocab_size,
             proj_dim=CFG["proj_dim"],
-            hidden=CFG["rnn_hidden"],
-            n_layers=CFG["rnn_layers"],
             embed_dim=CFG["embed_dim"],
             attn_heads=CFG["attn_heads"],
+            encoder_layers=CFG["encoder_layers"],
+            encoder_ff_dim=CFG["encoder_ff_dim"],
+            encoder_dropout=CFG["encoder_dropout"],
+            max_seq_len=CFG["seq_len"]
         ).to(self.device)
         state_dict = torch.load(ckpt_path, map_location=self.device)
         model.load_state_dict(state_dict)
