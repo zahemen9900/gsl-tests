@@ -1,129 +1,415 @@
-
-# Technical Spec: Transitioning to Real-Time GhSL Translation
-**Version:** 1.0
-**Target:** Real-Time Pose-Based Sign Language Translation (Sign2Text)
-**Current State:** Self-Supervised Contrastive Encoder (InfoNCE)
-**Goal:** Sequence-to-Sequence Translation with Semantic Awareness
+# Technical Spec: GhSL Sign2Text Translation System
+**Version:** 2.0  
+**Status:** ✅ Implemented  
+**Target:** Real-Time Pose-Based Sign Language Translation (Sign2Text)  
+**Architecture:** Transformer Encoder-Decoder with Multi-Objective Training
 
 ---
 
 ## 1. Executive Summary
-The current model achieves a robust **Instance Discrimination (Inst@1: ~0.75)** but suffers from high **Negative Similarity (~0.80)**. This indicates the embedding space is clustered by "motion characteristics" rather than "semantic meaning."
 
-To support a real-time 3D avatar and translation system, we must pivot from **Retrieval** (finding a similar video) to **Translation** (predicting text tokens from a stream). The architecture will evolve from a pure Encoder to an **Encoder-Decoder** or **CTC-based** system, utilizing **Supervised Contrastive Learning** to fix the embedding space before training the translation head.
+The GhSL Sign2Text system implements a **Sequence-to-Sequence translation model** that converts pose landmark sequences directly into text. The architecture combines:
 
----
+- **Transformer-based visual encoder** (4 layers, 4 attention heads)
+- **Auto-regressive Transformer decoder** (2 layers)
+- **Multi-objective training**: SupCon + CrossEntropy + Masked Frame Modeling
+- **Beam search decoding** with length penalty for inference
 
-## 2. Architectural Shift
-
-### Current Architecture (Retrieval)
-*   **Input:** Sequence of Pose Vectors $(T, 540)$.
-*   **Backbone:** Transformer/GRU Encoder.
-*   **Bottleneck:** Global Mean Pooling (collapses time).
-*   **Objective:** `InfoNCE Loss` (Video A $\approx$ Augmented Video A).
-*   **Inference:** Requires a database lookup (Vector Search). **High Latency.**
-
-### Target Architecture (Translation)
-*   **Input:** Sequence of Pose Vectors $(T, 540)$.
-*   **Backbone:** Transformer Encoder (Preserves Time sequence).
-*   **Head (New):** Auto-Regressive Transformer Decoder.
-*   **Objective:** `CrossEntropy` (Token Prediction) + `SupCon` (Feature Alignment).
-*   **Inference:** Direct token generation. **Low Latency.**
+### Key Achievements
+| Metric | Value |
+|--------|-------|
+| Instance Top-1 Accuracy | ~74.7% |
+| Positive Similarity | > 0.85 |
+| Negative Similarity | < 0.45 |
+| Model Parameters | ~2.5M |
 
 ---
 
-## 3. Data Strategy & Augmentation
+## 2. Model Architecture
 
-### A. The "Many-to-One" Text Expansion
-To handle semantic nuances, we will augment the **Text Labels**, not just the visual inputs.
-*   **Logic:** A single sign sequence (Video A) often maps to multiple valid English translations.
-*   **Implementation:**
-    *   *Source:* Video A (Sign: "I eat apple").
-    *   *Target 1:* "I am eating an apple."
-    *   *Target 2:* "I consume fruit."
-*   **Benefit:** This forces the Decoder to learn that the *visual representation* is flexible and corresponds to a semantic concept, preventing overfitting to rigid phrasing.
+### 2.1 Visual Encoder Pipeline
 
-### B. Visual Augmentation (Pose-Level)
-Continue using the existing pipeline (Random Rotate, Scale, Frame Drop) but ensure **Consistency Regularization**:
-*   If Video A is augmented to Video A', the model should predict the *exact same text tokens* for both.
+```
+Input: (B, T, 540)  →  FrameProjector  →  (B, T, 160)  →  TemporalTransformerEncoder  →  (B, T, 256) + pooled embedding
+```
 
----
+#### FrameProjector
+Projects per-frame 540-dim pose features to a lower-dimensional representation:
+```python
+class FrameProjector(nn.Module):
+    def __init__(self, in_dim, proj_dim=160):
+        self.norm = nn.LayerNorm(in_dim)
+        self.fc1 = nn.Linear(in_dim, proj_dim)
+        self.fc2 = nn.Linear(proj_dim, proj_dim)
+        self.act = nn.GELU()
+        self.dropout = nn.Dropout(0.1)
+```
 
+#### TemporalTransformerEncoder
+Full Transformer encoder replacing the previous GRU-based approach:
+```python
+class TemporalTransformerEncoder(nn.Module):
+    def __init__(self, in_dim, embed_dim=256, n_layers=4, attn_heads=4, ff_dim=512, dropout=0.1):
+        self.input_proj = nn.Linear(in_dim, embed_dim)
+        self.pos_encoder = TemporalPositionalEncoding(embed_dim, dropout, max_len=256)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=attn_heads,
+            dim_feedforward=ff_dim,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True,
+            norm_first=True  # Pre-norm architecture
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+```
 
-#### 3.1. The "Dual-View" Generation Pipeline
-**Goal:** Generate positive pairs for Supervised Contrastive Learning without new recordings.
-**Instruction:** Modify the `SignDataset` class to load a single `.npy` file and split it on-the-fly into two views:
+**Key features:**
+- **Sinusoidal positional encoding** for temporal awareness
+- **Pre-norm architecture** (`norm_first=True`) for training stability
+- **GELU activation** throughout
+- **Mean pooling** over time dimension for contrastive embeddings
+- **L2 normalization** of output embeddings
 
-*   **View 1 (Anchor):**
-    *   Take frames at indices `0::2` (Even indices).
-    *   Apply standard noise ($\sigma=0.01$).
-*   **View 2 (Positive):**
-    *   Take frames at indices `1::2` (Odd indices).
-    *   **Apply Y-Axis Rotation:** Rotate all $(x,y,z)$ coordinates by $\theta \in [-15^{\circ}, 15^{\circ}]$.
-    *   *Math:* $x' = x \cos(\theta) + z \sin(\theta)$; $z' = -x \sin(\theta) + z \cos(\theta)$.
+### 2.2 Text Decoder
 
-**Text Label Handling:**
-*   Use the `google/genai` API to generate 5 variations of the sentence (e.g., "I go home", "Going home", "I am heading home").
-*   In the `__getitem__` method:
-    *   Assign **Text Label A** (randomly chosen from the 5) to **View 1**.
-    *   Assign **Text Label B** (different random choice) to **View 2**.
-*   **Effect:** The model learns that *Visually Different Inputs* (View 1 vs 2) = *Semantically Identical Meanings*.
+Auto-regressive Transformer decoder for text generation:
+```python
+# Decoder components
+self.tgt_embed = nn.Embedding(vocab_size, embed_dim)
+self.pos_encoder = PositionalEncoding(embed_dim)
+decoder_layer = nn.TransformerDecoderLayer(
+    d_model=embed_dim,
+    nhead=attn_heads,
+    dim_feedforward=embed_dim * 4,
+    dropout=0.1,
+    activation='gelu'
+)
+self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=2)
+self.generator = nn.Linear(embed_dim, vocab_size)
+```
 
----
+### 2.3 Masked Frame Modeling Head (Auxiliary)
 
-
-## 4. Implementation Roadmap
-
-### Phase 1: Feature Space Cleanup (Supervised Contrastive)
-*Goal: Lower the Negative Similarity (0.80) and group semantically identical videos.*
-
-1.  **Modify DataSampler:** Instead of random batches, implement a `ClassBalancedSampler`. Ensure every batch contains at least 2 distinct videos of the *same sign/sentence*.
-2.  **Change Loss Function:** Switch from `InfoNCE` (Self-Supervised) to **`SupConLoss` (Supervised Contrastive Loss)**.
-    *   *Logic:* Pull embeddings of "Video A (Hello)" and "Video B (Hello)" together; Push "Video C (Goodbye)" away.
-3.  **Metric to Watch:** `NegSim` must drop below **0.5**. `PosSim` should remain > 0.8.
-
-### Phase 2: The Translation Head (Seq2Seq)
-*Goal: Convert pose sequences to text.*
-
-1.  **Remove Pooling:** Disable the `mean(dim=1)` operation in the Encoder. The output must be $(B, T, Hidden\_Dim)$.
-2.  **Attach Decoder:** Add a Transformer Decoder (2-4 layers).
-    *   *Cross-Attention:* Queries from Text, Keys/Values from Visual Encoder output.
-3.  **Tokenization:** Use a Subword Tokenizer (BPE) or a Gloss-level vocabulary on your target text.
-4.  **Training Objective:** Standard `CrossEntropyLoss` with **Teacher Forcing**.
-
-### Phase 3: Real-Time Inference Strategy
-1.  **Sliding Window:** Implement a buffer (e.g., 50 frames) with a stride (e.g., 10 frames).
-2.  **End-of-Sentence Token:** The model must learn to predict `<EOS>`. When `<EOS>` is detected, flush the buffer and display the sentence.
-
----
-
-## 5. Metrics for Success
-
-Do not rely on Loss or Contrastive Accuracy anymore. Use Generative Metrics.
-
-| Metric | Description | Target Goal (PoC) |
-| :--- | :--- | :--- |
-| **WER (Word Error Rate)** | (Substitutions + Deletions + Insertions) / Total Words. Lower is better. | **< 30%** |
-| **BLEU-4** | Measures n-gram overlap between prediction and reference translations. Higher is better. | **> 20.0** |
-| **NegSim (Encoder)** | Similarity of unrelated signs. | **< 0.5** |
-| **Inference Time** | Time from frame input to text output. | **< 100ms** |
-
----
-
-## 6. Direct Instructions for the Agent
-
-**Prompt to Agent:**
-> "Refactor the `signtalk_local_training.py` script.
-> 1.  **Data Loader:** Update `SignDataset` to accept a list of synonymous sentences for each video. During training, randomly select one text variation per epoch for the label.
-> 2.  **Encoder:** Keep the `TemporalEncoder` but add a flag `return_sequence=True` to bypass the mean pooling layer.
-> 3.  **New Module:** Create a `SignTranslationModel` class that combines the Encoder with a `nn.TransformerDecoder`.
-> 4.  **Loss:** Implement a dual-loss approach:
->     *   `Loss = λ * SupConLoss(encoder_features) + (1-λ) * CrossEntropy(decoder_text)`
-> 5.  **Evaluation:** Replace the 'Retrieval' loop with a 'Generation' loop using greedy decoding to calculate WER."
+MAE-style self-supervised objective on the visual encoder:
+```python
+self.mask_token = nn.Parameter(torch.zeros(1, 1, proj_dim))
+self.mask_decoder = nn.Sequential(
+    nn.LayerNorm(embed_dim),
+    nn.Linear(embed_dim, embed_dim),
+    nn.GELU(),
+    nn.Linear(embed_dim, proj_dim)
+)
+```
 
 ---
 
-### Why this approach works for you:
-*   **Leverages your 9k data:** The `SupConLoss` makes the most of your limited data by learning tight clusters before asking the model to learn grammar.
-*   **Synthetic Text:** Using multiple text variations prevents the model from memorizing "Video 42 = Sentence 42" and instead teaches "Video Features X = Semantic Concept Y."
-*   **Real-Time:** The Seq2Seq model is computationally light enough for edge inference compared to video-pixel models.
+## 3. Training Configuration
+
+### 3.1 Hyperparameters (CFG)
+
+```python
+CFG = {
+    # Data
+    'seq_len': 64,
+    'input_dim': 540,
+    'batch_size': 32,
+    'val_split': 0.15,
+    
+    # Architecture
+    'proj_dim': 160,
+    'embed_dim': 256,
+    'attn_heads': 4,
+    'encoder_layers': 4,
+    'encoder_ff_dim': 512,
+    'encoder_dropout': 0.1,
+    
+    # Training
+    'epochs': 50,
+    'lr': 1e-4,
+    'label_smoothing': 0.1,
+    
+    # Auxiliary loss
+    'masked_frame_ratio': 0.15,
+    'mask_loss_weight': 0.2,
+    
+    # Beam search
+    'beam_size': 4,
+    'beam_length_penalty': 0.8,
+    'decoder_max_len': 64,
+    
+    # Augmentation
+    'time_warp': 0.15,
+    'frame_dropout': 0.1,
+    'noise_sigma': 0.02,
+    'temporal_shift': 3,
+}
+```
+
+### 3.2 Multi-Objective Loss Function
+
+The training combines three complementary objectives:
+
+$$\mathcal{L}_{total} = \lambda \cdot \mathcal{L}_{SupCon} + (1-\lambda) \cdot \mathcal{L}_{CE} + \gamma \cdot \mathcal{L}_{mask}$$
+
+Where:
+- $\lambda = 0.5$ (balances contrastive vs translation)
+- $\gamma = 0.2$ (mask loss weight)
+
+#### Supervised Contrastive Loss (SupConLoss)
+```python
+class SupConLoss(nn.Module):
+    """https://arxiv.org/abs/2004.11362"""
+    def __init__(self, temperature=0.07):
+        self.temperature = temperature
+```
+- **Purpose:** Cluster embeddings by semantic meaning (sentence_id)
+- **Input:** Concatenated dual-view embeddings `[emb_a, emb_b]` with labels
+- **Effect:** Same-sign videos pulled together, different signs pushed apart
+
+#### CrossEntropy Loss
+```python
+ce_criterion = nn.CrossEntropyLoss(
+    ignore_index=pad_token_id,
+    label_smoothing=0.1
+)
+```
+- **Purpose:** Train decoder to predict text tokens
+- **Input:** Decoder logits vs shifted target tokens (teacher forcing)
+- **Label smoothing:** 0.1 to improve generalization
+
+#### Masked Frame Modeling Loss
+```python
+def masked_frame_loss(self, src, mask_ratio=0.15):
+    # Randomly mask 15% of frames
+    mask = (torch.rand(bsz, seq_len, device=proj.device) < mask_ratio)
+    masked_proj = proj.clone()
+    masked_proj[mask] = self.mask_token.expand_as(proj)[mask]
+    # Reconstruct masked frames
+    _, _, context = self.encoder(masked_proj, return_sequence=True)
+    recon = self.mask_decoder(context)
+    loss = F.smooth_l1_loss(recon[mask], proj[mask])
+```
+- **Purpose:** Self-supervised regularization, learns temporal dynamics
+- **Mask ratio:** 15% of frames randomly masked
+- **Reconstruction:** Smooth L1 loss on projector outputs
+
+---
+
+## 4. Data Pipeline
+
+### 4.1 Dual-View Generation
+
+The `SignDataset` generates two augmented views from each sample:
+
+```python
+def _split_dual_views(self, seq):
+    """Split sequence into even/odd frame views."""
+    view1 = seq[0::2]  # Even frames
+    view2 = seq[1::2]  # Odd frames
+    
+    # Apply Y-axis rotation to view2
+    angle = np.random.uniform(-self.cfg['rotation_angle'], self.cfg['rotation_angle'])
+    view2 = self._apply_y_rotation(view2, np.radians(angle))
+    
+    return view1, view2
+```
+
+**Y-Axis Rotation Mathematics:**
+$$x' = x \cos(\theta) + z \sin(\theta)$$
+$$z' = -x \sin(\theta) + z \cos(\theta)$$
+
+### 4.2 Text Variation Sampling
+
+Each sample can have multiple valid text translations stored in the metadata:
+```python
+def _sample_text_variation(self, row):
+    variations = [row['sentence']]
+    if pd.notna(row.get('sentence_variations')):
+        variations.extend(row['sentence_variations'].split('|'))
+    return random.choice(variations)
+```
+
+### 4.3 ClassBalancedSampler
+
+Ensures every batch contains K instances of each sentence class for effective SupCon:
+```python
+class ClassBalancedSampler(Sampler):
+    def __init__(self, meta_df, batch_size, instances_per_class=2):
+        self.instances_per_class = instances_per_class
+        self.classes_per_batch = batch_size // instances_per_class
+```
+
+### 4.4 Augmentation Pipeline
+
+| Augmentation | Training | Validation |
+|--------------|----------|------------|
+| Time Warp | 0.15 | 0.05 |
+| Frame Dropout | 0.10 | 0.05 |
+| Noise σ | 0.02 | 0.01 |
+| Temporal Shift | ±3 frames | ±1 frame |
+| Y-Axis Rotation | ±15° | 0° |
+
+### 4.5 SimpleTokenizer
+
+Word-level tokenizer with special tokens:
+```python
+class SimpleTokenizer:
+    def __init__(self, sentences, vocab_size=1000):
+        self.pad_token, self.pad_token_id = '<PAD>', 0
+        self.sos_token, self.sos_token_id = '<SOS>', 1
+        self.eos_token, self.eos_token_id = '<EOS>', 2
+        self.unk_token, self.unk_token_id = '<UNK>', 3
+        # Build vocabulary from word frequencies
+```
+
+---
+
+## 5. Inference: Beam Search Decoding
+
+### 5.1 Algorithm
+
+```python
+def beam_search_decode_batch(
+    model, src_batch, tokenizer, device,
+    max_len=64, beam_size=4, length_penalty=0.8
+):
+    # Encode visual sequence
+    proj = model.projector(src_batch)
+    _, _, context = model.encoder(proj, return_sequence=True)
+    memory = context.permute(1, 0, 2)  # (T, B, E)
+    
+    # Beam search per sample
+    for idx in range(batch_size):
+        best_seq = _beam_search_single(model, memory[:, idx:idx+1, :], ...)
+```
+
+### 5.2 Length Penalty
+
+Prevents overly short predictions:
+$$score_{adjusted} = \frac{score}{((5 + length) / 6)^\alpha}$$
+
+Where $\alpha = 0.8$ (CFG `beam_length_penalty`)
+
+### 5.3 Streaming Inference
+
+For real-time applications, the system supports streaming with motion gating:
+
+```python
+class StreamingDecoder:
+    def __init__(self, model, tokenizer, cfg):
+        self.buffer = []
+        self.motion_threshold = cfg['motion_floor']
+    
+    def process_frame(self, frame):
+        self.buffer.append(frame)
+        if len(self.buffer) >= self.min_frames:
+            motion = compute_motion_energy(self.buffer)
+            if motion.mean() > self.motion_threshold:
+                return self.decode_buffer()
+        return None
+```
+
+---
+
+## 6. Evaluation Metrics
+
+### 6.1 Contrastive Metrics
+
+| Metric | Description | Target |
+|--------|-------------|--------|
+| **Inst@1** | Instance-level retrieval accuracy | > 0.70 |
+| **PosSim** | Cosine similarity of positive pairs | > 0.85 |
+| **NegSim** | Mean similarity of negatives | < 0.50 |
+
+### 6.2 Translation Metrics
+
+| Metric | Description | Target |
+|--------|-------------|--------|
+| **WER** | Word Error Rate $(S+D+I)/N$ | < 30% |
+| **BLEU-4** | 4-gram precision with brevity penalty | > 20.0 |
+| **Exact Match** | Percentage of perfect predictions | > 10% |
+
+### 6.3 Retrieval Metrics
+
+| Metric | Description | Target |
+|--------|-------------|--------|
+| **Ret@1** | Sentence retrieval top-1 accuracy | > 0.65 |
+| **MRR** | Mean Reciprocal Rank | > 0.75 |
+
+---
+
+## 7. Export Pipeline
+
+### 7.1 ONNX Export
+
+```python
+torch.onnx.export(
+    model,
+    dummy_input,
+    "sign_encoder.onnx",
+    input_names=['visual_input'],
+    output_names=['embedding', 'attention'],
+    dynamic_axes={
+        'visual_input': {0: 'batch', 1: 'frames'},
+        'embedding': {0: 'batch'}
+    },
+    opset_version=18
+)
+```
+
+### 7.2 Exported Artifacts
+
+| File | Description |
+|------|-------------|
+| `sign_encoder.onnx` | ONNX model for CPU/GPU inference |
+| `embeddings.npy` | Reference embeddings database |
+| `embeddings_map.csv` | Metadata mapping for retrieval |
+| `prototypes.npz` | Sentence-level prototype embeddings |
+| `global_stats.npz` | Feature normalization statistics |
+| `model_config.json` | Training configuration snapshot |
+
+---
+
+## 8. Implementation Notes
+
+### 8.1 Training Loop Structure
+
+```python
+def train_epoch(model, loader, optimizer, supcon_criterion, ce_criterion, lambda_val=0.5):
+    for a, b, labels, sentence_ids, text_a, text_b, token_ids in loader:
+        # 1. Supervised Contrastive Loss
+        emb_a = model.encode_visual(a)
+        emb_b = model.encode_visual(b)
+        features = torch.cat([emb_a, emb_b], dim=0)
+        combined_labels = torch.cat([sentence_ids, sentence_ids], dim=0)
+        loss_supcon = supcon_criterion(features, combined_labels)
+        
+        # 2. CrossEntropy Loss (Seq2Seq)
+        tgt_mask = generate_square_subsequent_mask(tgt_seq_len)
+        logits, _ = model(a, tgt_input, tgt_mask=tgt_mask)
+        loss_ce = ce_criterion(logits.reshape(-1, vocab_size), tgt_output.reshape(-1))
+        
+        # 3. Masked Frame Modeling
+        loss_mask = model.masked_frame_loss(a, mask_ratio=0.15)
+        
+        # Combined loss
+        loss = lambda_val * loss_supcon + (1 - lambda_val) * loss_ce + 0.2 * loss_mask
+```
+
+### 8.2 Key Design Decisions
+
+1. **Pre-norm Transformer**: Uses `norm_first=True` for better training stability
+2. **Dual-view splitting**: Even/odd frames ensure temporal coverage while creating distinct views
+3. **Y-axis rotation**: Simulates viewpoint changes without expensive 3D rendering
+4. **ClassBalancedSampler**: Critical for effective SupCon with imbalanced data
+5. **Beam search with length penalty**: Balances fluency vs brevity in outputs
+6. **Masked frame modeling**: Self-supervised regularization that improves encoder representations
+
+### 8.3 Future Improvements
+
+- [ ] Subword tokenization (BPE/SentencePiece) for better OOV handling
+- [ ] Conformer encoder for local + global attention
+- [ ] CTC auxiliary loss for alignment learning
+- [ ] Multi-task learning with gloss prediction
+- [ ] Knowledge distillation from larger models

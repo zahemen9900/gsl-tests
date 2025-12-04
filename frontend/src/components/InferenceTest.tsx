@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Webcam from 'react-webcam';
 import type { Holistic, Results } from '@mediapipe/holistic';
 import { extractFeatureVector, getHolisticInstance, drawLandmarks } from '../utils/mediapipe';
+import WaveformVisualizer from './WaveformVisualizer';
 import styles from './InferenceTest.module.css';
 
 interface SampleItem {
@@ -36,6 +37,12 @@ const InferenceTest: React.FC<InferenceTestProps> = ({ onBack }) => {
     const [streamingStatus, setStreamingStatus] = useState<'idle' | 'processing' | 'error'>('idle');
     const [streamingHistory, setStreamingHistory] = useState<string[]>([]);
     const [showLandmarks, setShowLandmarks] = useState(true);
+    const [allCapturedFrames, setAllCapturedFrames] = useState<number[][]>([]);
+    const [predictionWindowStart, setPredictionWindowStart] = useState(0);
+    const [predictionWindowEnd, setPredictionWindowEnd] = useState(0);
+    const [isPanelModalOpen, setIsPanelModalOpen] = useState(false);
+    const modalVideoRef = useRef<HTMLVideoElement>(null);
+    const allCapturedFramesRef = useRef(0);
     
     const webcamRef = useRef<Webcam>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -72,6 +79,10 @@ const InferenceTest: React.FC<InferenceTestProps> = ({ onBack }) => {
     }, [realTimeEnabled]);
 
     useEffect(() => {
+        allCapturedFramesRef.current = allCapturedFrames.length;
+    }, [allCapturedFrames]);
+
+    useEffect(() => {
         fetch('http://localhost:8000/samples')
             .then(res => {
                 if (!res.ok) throw new Error('Failed to fetch samples');
@@ -99,6 +110,10 @@ const InferenceTest: React.FC<InferenceTestProps> = ({ onBack }) => {
         streamLastSentRef.current = now;
         setStreamingStatus('processing');
         const payload = streamBufferRef.current.slice(-STREAM_WINDOW);
+        const endIdx = allCapturedFramesRef.current - 1;
+        const startIdx = Math.max(0, endIdx - payload.length + 1);
+        setPredictionWindowStart(startIdx);
+        setPredictionWindowEnd(Math.max(startIdx, endIdx));
 
         try {
             const res = await fetch('http://localhost:8000/predict', {
@@ -137,6 +152,13 @@ const InferenceTest: React.FC<InferenceTestProps> = ({ onBack }) => {
         const features = extractFeatureVector(results);
         if (!features) return;
         const featureArray = Array.from(features);
+
+        // Always capture frames for visualization
+        setAllCapturedFrames(prev => {
+            const next = [...prev, featureArray];
+            allCapturedFramesRef.current = next.length;
+            return next;
+        });
 
         if (statusRef.current === 'recording') {
             setRecordedFrames(prev => [...prev, featureArray]);
@@ -194,6 +216,15 @@ const InferenceTest: React.FC<InferenceTestProps> = ({ onBack }) => {
     }, [processVideo]);
 
     useEffect(() => {
+        if (!isPanelModalOpen) return;
+        const videoEl = modalVideoRef.current;
+        const src = webcamRef.current?.video?.srcObject as MediaStream | null | undefined;
+        if (videoEl && src) {
+            videoEl.srcObject = src;
+        }
+    }, [isPanelModalOpen]);
+
+    useEffect(() => {
         return () => {
             if (recordTimeoutRef.current) {
                 clearTimeout(recordTimeoutRef.current);
@@ -233,6 +264,9 @@ const InferenceTest: React.FC<InferenceTestProps> = ({ onBack }) => {
     const startRecording = () => {
         setStatus('recording');
         setRecordedFrames([]);
+        const currentFrameCount = allCapturedFrames.length;
+        setPredictionWindowStart(currentFrameCount);
+        setPredictionWindowEnd(currentFrameCount);
         recordingStartRef.current = Date.now();
         if (recordTimeoutRef.current) {
             clearTimeout(recordTimeoutRef.current);
@@ -267,6 +301,7 @@ const InferenceTest: React.FC<InferenceTestProps> = ({ onBack }) => {
 
     const stopRecording = () => {
         setStatus('processing');
+        setPredictionWindowEnd(allCapturedFrames.length);
         if (recordTimeoutRef.current) {
             clearTimeout(recordTimeoutRef.current);
             recordTimeoutRef.current = null;
@@ -408,21 +443,36 @@ const InferenceTest: React.FC<InferenceTestProps> = ({ onBack }) => {
                                 <p>Perform the sign yourself</p>
                             </div>
                         </div>
-                        <button
-                            className={`${styles.landmarkToggle} ${showLandmarks ? styles.landmarkToggleActive : ''}`}
-                            onClick={() => setShowLandmarks(prev => !prev)}
-                            title={showLandmarks ? 'Hide skeleton overlay' : 'Show skeleton overlay'}
-                        >
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                <circle cx="12" cy="5" r="3"/>
-                                <line x1="12" y1="8" x2="12" y2="16"/>
-                                <line x1="12" y1="12" x2="8" y2="10"/>
-                                <line x1="12" y1="12" x2="16" y2="10"/>
-                                <line x1="12" y1="16" x2="9" y2="21"/>
-                                <line x1="12" y1="16" x2="15" y2="21"/>
-                            </svg>
-                            <span>{showLandmarks ? 'Skeleton On' : 'Skeleton Off'}</span>
-                        </button>
+                        <div className={styles.panelActions}>
+                            <button
+                                className={styles.expandPanelButton}
+                                onClick={() => setIsPanelModalOpen(true)}
+                                title="Expand preview"
+                                type="button"
+                            >
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <polyline points="15 3 21 3 21 9" />
+                                    <polyline points="9 21 3 21 3 15" />
+                                    <line x1="21" y1="3" x2="14" y2="10" />
+                                    <line x1="3" y1="21" x2="10" y2="14" />
+                                </svg>
+                            </button>
+                            <button
+                                className={`${styles.landmarkToggle} ${showLandmarks ? styles.landmarkToggleActive : ''}`}
+                                onClick={() => setShowLandmarks(prev => !prev)}
+                                title={showLandmarks ? 'Hide skeleton overlay' : 'Show skeleton overlay'}
+                            >
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                    <circle cx="12" cy="5" r="3"/>
+                                    <line x1="12" y1="8" x2="12" y2="16"/>
+                                    <line x1="12" y1="12" x2="8" y2="10"/>
+                                    <line x1="12" y1="12" x2="16" y2="10"/>
+                                    <line x1="12" y1="16" x2="9" y2="21"/>
+                                    <line x1="12" y1="16" x2="15" y2="21"/>
+                                </svg>
+                                <span>{showLandmarks ? 'Skeleton On' : 'Skeleton Off'}</span>
+                            </button>
+                        </div>
                     </div>
 
                     <div className={styles.cameraContainer}>
@@ -491,6 +541,18 @@ const InferenceTest: React.FC<InferenceTestProps> = ({ onBack }) => {
                             </div>
                         )}
                     </div>
+
+                    {/* Waveform Visualizer */}
+                    <WaveformVisualizer
+                        frames={allCapturedFrames}
+                        streamWindowSize={STREAM_WINDOW}
+                        maxBufferSize={500}
+                        isRecording={status === 'recording'}
+                        isPredicting={status === 'processing'}
+                        predictionWindowStart={predictionWindowStart}
+                        predictionWindowEnd={predictionWindowEnd}
+                        motionThreshold={0.001}
+                    />
 
                     <div className={styles.realtimeControls}>
                         <div className={styles.realtimeHeader}>
@@ -589,6 +651,54 @@ const InferenceTest: React.FC<InferenceTestProps> = ({ onBack }) => {
                     )}
                 </section>
             </main>
+
+            {isPanelModalOpen && (
+                <div className={styles.modalOverlay}>
+                    <div className={styles.modalContent}>
+                        <div className={styles.modalHeader}>
+                            <div className={styles.modalTitle}>Expanded Preview</div>
+                            <button
+                                className={styles.modalClose}
+                                onClick={() => setIsPanelModalOpen(false)}
+                                aria-label="Close expanded preview"
+                            >
+                                ✕
+                            </button>
+                        </div>
+                        <div className={styles.modalBody}>
+                            <div className={styles.modalVideoSection}>
+                                <video
+                                    ref={modalVideoRef}
+                                    className={styles.modalVideo}
+                                    autoPlay
+                                    muted
+                                    playsInline
+                                />
+                            </div>
+                            <div className={styles.modalRight}>
+                                <div className={styles.modalWaveformStack}>
+                                    <WaveformVisualizer
+                                        frames={allCapturedFrames}
+                                        streamWindowSize={STREAM_WINDOW}
+                                        maxBufferSize={500}
+                                        isRecording={status === 'recording'}
+                                        isPredicting={status === 'processing'}
+                                        predictionWindowStart={predictionWindowStart}
+                                        predictionWindowEnd={predictionWindowEnd}
+                                        motionThreshold={0.001}
+                                    />
+                                </div>
+                                <div className={styles.modalPrediction}>
+                                    <div className={styles.modalPredictionHeader}>Prediction</div>
+                                    <p className={styles.modalPredictionText}>
+                                        {streamingPrediction || prediction || 'Waiting for inference...'}
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Tips */}
             <div className={styles.tips}>

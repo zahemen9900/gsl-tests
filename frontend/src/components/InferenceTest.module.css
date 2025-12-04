@@ -129,6 +129,32 @@
   justify-content: space-between;
 }
 
+.panelActions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.expandPanelButton {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.8);
+  border-radius: 10px;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.expandPanelButton:hover {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: rgba(99, 102, 241, 0.5);
+  color: #fff;
+}
+
 .panelHeaderInfo {
   display: flex;
   align-items: center;
@@ -712,6 +738,122 @@
 
 .tipIcon {
   font-size: 1rem;
+}
+
+/* Modal for expanded preview */
+.modalOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  z-index: 2000;
+}
+
+.modalContent {
+  background: rgba(18, 18, 26, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  width: min(1200px, 96vw);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 10px 50px rgba(0, 0, 0, 0.35);
+}
+
+.modalHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.modalTitle {
+  font-weight: 700;
+  color: #fff;
+}
+
+.modalClose {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: #fff;
+  border-radius: 8px;
+  width: 34px;
+  height: 34px;
+  cursor: pointer;
+}
+
+.modalBody {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr;
+  gap: 1rem;
+  padding: 1rem;
+  overflow: hidden;
+}
+
+.modalVideoSection {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  overflow: hidden;
+  display: flex;
+}
+
+.modalVideo {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.modalRight {
+  display: grid;
+  grid-template-rows: 2fr 1fr;
+  gap: 0.75rem;
+}
+
+.modalWaveformStack {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  padding: 0.5rem;
+  overflow: hidden;
+}
+
+.modalPrediction {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  padding: 0.75rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.modalPredictionHeader {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #fff;
+}
+
+.modalPredictionText {
+  font-size: 0.95rem;
+  color: rgba(255, 255, 255, 0.9);
+  line-height: 1.4;
+}
+
+@media (max-width: 900px) {
+  .modalBody {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto;
+  }
+
+  .modalRight {
+    grid-template-rows: auto auto;
+  }
 }
 
 /* Responsive */
