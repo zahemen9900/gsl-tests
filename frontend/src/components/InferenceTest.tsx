@@ -46,6 +46,7 @@ const InferenceTest: React.FC<InferenceTestProps> = ({ onBack }) => {
     
     const webcamRef = useRef<Webcam>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
+    const modalCanvasRef = useRef<HTMLCanvasElement>(null);
     const holisticRef = useRef<Holistic | null>(null);
     const requestRef = useRef<number>();
     const recordingStartRef = useRef<number>(0);
@@ -144,7 +145,29 @@ const InferenceTest: React.FC<InferenceTestProps> = ({ onBack }) => {
             if (ctx) {
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
                 if (showLandmarks) {
+                    ctx.save();
+                    ctx.translate(canvas.width, 0);
+                    ctx.scale(-1, 1);
                     drawLandmarks(ctx, results, canvas.width, canvas.height);
+                    ctx.restore();
+                }
+            }
+        }
+
+        if (modalCanvasRef.current && webcamRef.current?.video) {
+            const video = webcamRef.current.video;
+            const canvas = modalCanvasRef.current;
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                if (showLandmarks) {
+                    ctx.save();
+                    ctx.translate(canvas.width, 0);
+                    ctx.scale(-1, 1);
+                    drawLandmarks(ctx, results, canvas.width, canvas.height);
+                    ctx.restore();
                 }
             }
         }
@@ -479,7 +502,7 @@ const InferenceTest: React.FC<InferenceTestProps> = ({ onBack }) => {
                         <Webcam
                             ref={webcamRef}
                             className={styles.webcam}
-                            mirrored
+                            mirrored={false}
                             videoConstraints={{
                                 width: 640,
                                 height: 480,
@@ -657,23 +680,48 @@ const InferenceTest: React.FC<InferenceTestProps> = ({ onBack }) => {
                     <div className={styles.modalContent}>
                         <div className={styles.modalHeader}>
                             <div className={styles.modalTitle}>Expanded Preview</div>
-                            <button
-                                className={styles.modalClose}
-                                onClick={() => setIsPanelModalOpen(false)}
-                                aria-label="Close expanded preview"
-                            >
-                                ✕
-                            </button>
+                            <div className={styles.modalHeaderActions}>
+                                <button
+                                    className={`${styles.landmarkToggle} ${showLandmarks ? styles.landmarkToggleActive : ''}`}
+                                    onClick={() => setShowLandmarks(prev => !prev)}
+                                    title={showLandmarks ? 'Hide skeleton overlay' : 'Show skeleton overlay'}
+                                    type="button"
+                                >
+                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                        <circle cx="12" cy="5" r="3"/>
+                                        <line x1="12" y1="8" x2="12" y2="16"/>
+                                        <line x1="12" y1="12" x2="8" y2="10"/>
+                                        <line x1="12" y1="12" x2="16" y2="10"/>
+                                        <line x1="12" y1="16" x2="9" y2="21"/>
+                                        <line x1="12" y1="16" x2="15" y2="21"/>
+                                    </svg>
+                                    <span>{showLandmarks ? 'Skeleton On' : 'Skeleton Off'}</span>
+                                </button>
+                                <button
+                                    className={styles.modalClose}
+                                    onClick={() => setIsPanelModalOpen(false)}
+                                    aria-label="Close expanded preview"
+                                    type="button"
+                                >
+                                    ✕
+                                </button>
+                            </div>
                         </div>
                         <div className={styles.modalBody}>
                             <div className={styles.modalVideoSection}>
-                                <video
-                                    ref={modalVideoRef}
-                                    className={styles.modalVideo}
-                                    autoPlay
-                                    muted
-                                    playsInline
-                                />
+                                <div className={styles.modalVideoWrapper}>
+                                    <video
+                                        ref={modalVideoRef}
+                                        className={styles.modalVideo}
+                                        autoPlay
+                                        muted
+                                        playsInline
+                                    />
+                                    <canvas
+                                        ref={modalCanvasRef}
+                                        className={`${styles.modalOverlayCanvas} ${showLandmarks ? styles.overlayVisible : ''}`}
+                                    />
+                                </div>
                             </div>
                             <div className={styles.modalRight}>
                                 <div className={styles.modalWaveformStack}>

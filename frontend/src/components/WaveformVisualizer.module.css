@@ -20,7 +20,6 @@
 }
 
 .collapsed .metricsPanel,
-.collapsed .miniMapContainer,
 .collapsed .legend {
   display: none;
 }
@@ -239,32 +238,6 @@
   background: linear-gradient(-90deg, rgba(15, 15, 25, 0.8) 0%, transparent 100%);
 }
 
-/* Mini Map */
-.miniMapContainer {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  background: rgba(0, 0, 0, 0.2);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 8px;
-  padding: 0.5rem;
-}
-
-.miniMapLabel {
-  font-size: 0.7rem;
-  color: rgba(255, 255, 255, 0.4);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  writing-mode: vertical-rl;
-  text-orientation: mixed;
-  transform: rotate(180deg);
-}
-
-.miniMap {
-  flex: 1;
-  height: 50px;
-}
-
 /* Legend */
 .legend {
   display: flex;
@@ -339,9 +312,5 @@
   
   .mainChart {
     height: 120px;
-  }
-  
-  .miniMap {
-    height: 40px;
   }
 }

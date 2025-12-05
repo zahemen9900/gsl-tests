@@ -43,7 +43,7 @@ class RingBuffer<T> {
   }
 }
 
-// Simple stride downsampling to avoid re-mapping x coordinates
+// Simple stride downsampling (no-op now that minimap is removed) kept for future use
 function strideDownsample<T>(data: T[], maxPoints: number): T[] {
   if (data.length <= maxPoints) return data;
   const step = Math.ceil(data.length / maxPoints);
@@ -142,9 +142,7 @@ const WaveformVisualizer: React.FC<WaveformVisualizerProps> = ({
   motionThreshold = 0.001,
 }) => {
   const mainChartRef = useRef<HTMLDivElement>(null);
-  const miniMapRef = useRef<HTMLDivElement>(null);
   const mainChartInstance = useRef<echarts.ECharts | null>(null);
-  const miniMapInstance = useRef<echarts.ECharts | null>(null);
   const dataBufferRef = useRef(new RingBuffer<FrameData>(maxBufferSize));
   const lastFrameTimeRef = useRef(Date.now());
   const frameCountRef = useRef(0);
@@ -191,16 +189,9 @@ const WaveformVisualizer: React.FC<WaveformVisualizerProps> = ({
       });
     }
     
-    if (miniMapRef.current && !miniMapInstance.current) {
-      miniMapInstance.current = echarts.init(miniMapRef.current, undefined, {
-        renderer: 'canvas',
-      });
-    }
-    
     // Handle resize
     const handleResize = () => {
       mainChartInstance.current?.resize();
-      miniMapInstance.current?.resize();
     };
     window.addEventListener('resize', handleResize);
     
@@ -210,10 +201,6 @@ const WaveformVisualizer: React.FC<WaveformVisualizerProps> = ({
       if (mainChartInstance.current) {
         mainChartInstance.current.dispose();
         mainChartInstance.current = null;
-      }
-      if (miniMapInstance.current) {
-        miniMapInstance.current.dispose();
-        miniMapInstance.current = null;
       }
     };
   }, []);
@@ -257,7 +244,7 @@ const WaveformVisualizer: React.FC<WaveformVisualizerProps> = ({
 
   const renderCharts = useCallback(() => {
     if (!isActiveRef.current) return;
-    if (!mainChartInstance.current || !miniMapInstance.current) return;
+    if (!mainChartInstance.current) return;
     const data = dataBufferRef.current.toArray();
     if (data.length === 0) return;
 
@@ -272,7 +259,6 @@ const WaveformVisualizer: React.FC<WaveformVisualizerProps> = ({
 
     const predictionData = fullData.filter(([, , , used]) => used).map(([x, y]) => [x, y]);
 
-    const miniMapData = strideDownsample(fullData, 120).map(([x, y]) => [x, y]);
     const minTime = fullData[0]?.[0] ?? 0;
     const maxTime = fullData[fullData.length - 1]?.[0] ?? 0;
 
@@ -382,44 +368,7 @@ const WaveformVisualizer: React.FC<WaveformVisualizerProps> = ({
       ],
     };
 
-    const miniMapOption: echarts.EChartsOption = {
-      animation: false,
-      backgroundColor: 'transparent',
-      grid: {
-        left: 10,
-        right: 10,
-        top: 5,
-        bottom: 5,
-      },
-      xAxis: {
-        type: 'value',
-        show: false,
-        min: minTime,
-        max: maxTime,
-      },
-      yAxis: {
-        type: 'value',
-        show: false,
-      },
-      series: [
-        {
-          type: 'line',
-          data: miniMapData,
-          smooth: true,
-          symbol: 'none',
-          lineStyle: { width: 1, color: 'rgba(99, 102, 241, 0.5)' },
-          areaStyle: {
-            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-              { offset: 0, color: 'rgba(99, 102, 241, 0.2)' },
-              { offset: 1, color: 'rgba(99, 102, 241, 0.02)' },
-            ]),
-          },
-        },
-      ],
-    };
-
     mainChartInstance.current.setOption(mainOption, true);
-    miniMapInstance.current.setOption(miniMapOption, true);
   }, [motionThreshold]);
 
   // Recompute flags when prediction window changes so existing points reflect latest window
@@ -446,10 +395,9 @@ const WaveformVisualizer: React.FC<WaveformVisualizerProps> = ({
 
   // Force refresh on expand/collapse
   useEffect(() => {
-    if (!mainChartInstance.current || !miniMapInstance.current) return;
+    if (!mainChartInstance.current) return;
     requestAnimationFrame(() => {
       mainChartInstance.current?.resize();
-      miniMapInstance.current?.resize();
       renderCharts();
     });
   }, [isExpanded, renderCharts]);
@@ -561,12 +509,6 @@ const WaveformVisualizer: React.FC<WaveformVisualizerProps> = ({
         {/* Gradient overlays for visual polish */}
         <div className={styles.chartGlowLeft} />
         <div className={styles.chartGlowRight} />
-      </div>
-      
-      {/* Mini Map */}
-      <div className={styles.miniMapContainer}>
-        <span className={styles.miniMapLabel}>Overview</span>
-        <div ref={miniMapRef} className={styles.miniMap} />
       </div>
       
       {/* Legend */}

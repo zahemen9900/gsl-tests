@@ -772,6 +772,12 @@
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
+.modalHeaderActions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .modalTitle {
   font-weight: 700;
   color: #fff;
@@ -807,6 +813,26 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.modalVideoWrapper {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.modalOverlayCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.modalOverlayCanvas.overlayVisible {
+  opacity: 1;
 }
 
 .modalRight {
