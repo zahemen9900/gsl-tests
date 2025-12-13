@@ -780,9 +780,9 @@ def main():
 
     # Load keys (prefer env, fallback to hardcoded list if present)
     API_KEYS = [
-        "AIzaSyDo2yWQxmjP7K8D-9yR2zXViFLuD69m7PE", "AIzaSyDdaU9M-shaHr9TSQ2Ap_E-BL5ghkbjD80",
-        "AIzaSyC77MYHymuP5JUUQMoA6vqdggl6MS7MQqY", "AIzaSyAnjHCUDAVEZFAg9Dmj8gXkLZ4ym3IYlMk",
-        "AIzaSyCcivbs9T8eA5HzdFkr5Cs9WgAyBsB90_M", "AIzaSyBMIkY1whu5696c-j0pyNHEpV4-5ssIpqg"
+        "Key_1", "Key_2",
+        "Key_3", "Key_4",
+        "Key_5", "Key_6"
     ]
 
     num_total_keys = len(API_KEYS)
