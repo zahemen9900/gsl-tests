@@ -350,7 +350,18 @@ def main():
 
     dataset_dir = download_dataset(args.dataset_gcs_uri, args.workdir)
     video_dir = os.path.join(dataset_dir, "videos")
-    meta_path = os.path.join(dataset_dir, "metadata.csv")
+    # Accept both metadata.csv and sampled_metadata.csv to match provided bundles.
+    meta_candidates = ["metadata.csv", "sampled_metadata.csv"]
+    meta_path = None
+    for name in meta_candidates:
+        candidate = os.path.join(dataset_dir, name)
+        if os.path.exists(candidate):
+            meta_path = candidate
+            break
+    if meta_path is None:
+        available = ", ".join(sorted(os.listdir(dataset_dir)))
+        raise FileNotFoundError(f"No metadata file found. Expected one of {meta_candidates}; available: {available}")
+
     output_dir = os.path.join(args.workdir, "features", "text2sign_pose")
     proc_dir = os.path.join(args.workdir, "proc")
     plot_dir = args.plot_dir or os.path.join(proc_dir, "plots_t2s")

@@ -11,6 +11,7 @@ This repository contains pipelines, training code, and docs for Sign2Text and Te
 - sample_dataset/: Small sample dataset with videos and metadata for local testing.
 - runs/: Saved checkpoints, embeddings, and training history from prior experiments.
 - TEXT-TO-SIGN/: Notebooks and docs focused on Text2Sign objectives.
+- SIGN-TO-TEXT/: Notebooks and docs focused on Sign2Text objectives.
 - proc/: Processing outputs (metadata, stats, plots) when run locally; mirrored to GCS as needed.
 - deliverables.md and docs/deliverables/: High-level milestone tracking and detailed deliverable notes.
 
