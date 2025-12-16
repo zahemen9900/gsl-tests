@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModel
 from tqdm import tqdm
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -34,20 +34,22 @@ DEFAULT_OUT_DIR = "gs://ghsl-model-artifacts/sign2text/runs"
 DEFAULT_GCS_CACHE = "/tmp/gcs_cache_sign2text"
 MAX_SEQ_LEN = 128
 TEXT_MAX_LEN = 64
-BATCH_SIZE = 16
+BATCH_SIZE = 128  # Increased for contrastive learning
 NUM_WORKERS = 4
 POSE_DIM = 33 * 4 + 2 * 21 * 3 + 94 * 3
-HIDDEN_DIM = 256
-N_HEAD = 4
-NUM_LAYERS = 4
+HIDDEN_DIM = 512  # Increased capacity
+PROJ_DIM = 256    # Projection head dim
+N_HEAD = 8        # Increased heads
+NUM_LAYERS = 6    # Deeper model
 LR = 3e-4
 BETA1, BETA2 = 0.9, 0.98
 GRAD_CLIP = 1.0
-EPOCHS = 30
+EPOCHS = 50       # More epochs
 WARMUP_STEPS = 4000
 CHECKPOINT_DIR = "checkpoints_sign2text"
 TEXT_MODEL = "distilbert-base-uncased"
-LAMBDA_CONTRAST = 0.1
+LAMBDA_CLIP = 1.0
+TEMPERATURE = 0.05
 
 
 # -----------------------------
@@ -137,11 +139,27 @@ def collate_fn(batch):
 # -----------------------------
 # Models
 # -----------------------------
+class FrozenTextEncoder(nn.Module):
+    def __init__(self, model_name=TEXT_MODEL, proj_dim=PROJ_DIM):
+        super().__init__()
+        self.backbone = AutoModel.from_pretrained(model_name)
+        for p in self.backbone.parameters():
+            p.requires_grad = False
+        self.proj = nn.Linear(self.backbone.config.hidden_size, proj_dim)
+
+    def forward(self, input_ids, attention_mask):
+        with torch.no_grad():
+            out = self.backbone(input_ids=input_ids, attention_mask=attention_mask)
+            # Use CLS token (index 0)
+            cls_emb = out.last_hidden_state[:, 0]
+        return self.proj(cls_emb)
+
+
 class PoseEncoder(nn.Module):
     def __init__(self, pose_dim=POSE_DIM, hidden_dim=HIDDEN_DIM, n_heads=N_HEAD, num_layers=NUM_LAYERS):
         super().__init__()
         self.input_proj = nn.Linear(pose_dim, hidden_dim)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=n_heads, dim_feedforward=hidden_dim * 4, batch_first=True)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=n_heads, dim_feedforward=hidden_dim * 4, batch_first=True, dropout=0.2)
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.pos_emb = nn.Parameter(torch.randn(MAX_SEQ_LEN, hidden_dim) * 0.02)
 
@@ -157,7 +175,7 @@ class TextDecoder(nn.Module):
         super().__init__()
         self.emb = nn.Embedding(vocab_size, hidden_dim, padding_idx=pad_token_id)
         self.pos_emb = nn.Parameter(torch.randn(TEXT_MAX_LEN, hidden_dim) * 0.02)
-        decoder_layer = nn.TransformerDecoderLayer(d_model=hidden_dim, nhead=n_heads, dim_feedforward=hidden_dim * 4, batch_first=True)
+        decoder_layer = nn.TransformerDecoderLayer(d_model=hidden_dim, nhead=n_heads, dim_feedforward=hidden_dim * 4, batch_first=True, dropout=0.2)
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
         self.fc = nn.Linear(hidden_dim, vocab_size)
 
@@ -172,11 +190,22 @@ class Sign2TextModel(nn.Module):
         super().__init__()
         self.encoder = PoseEncoder()
         self.decoder = TextDecoder(vocab_size=vocab_size, pad_token_id=pad_token_id)
+        self.visual_proj = nn.Linear(HIDDEN_DIM, PROJ_DIM)
+        self.text_encoder = FrozenTextEncoder()
 
-    def forward(self, frames, tgt_ids, tgt_mask=None):
+    def forward(self, frames, tgt_ids, tgt_mask=None, text_input_ids=None, text_attn_mask=None):
         memory, pooled = self.encoder(frames)
+        
+        # Visual Projection for CLIP
+        visual_proj = self.visual_proj(pooled)
+        
+        # Text Projection for CLIP
+        text_proj = None
+        if text_input_ids is not None:
+            text_proj = self.text_encoder(text_input_ids, text_attn_mask)
+            
         logits = self.decoder(tgt_ids, memory, tgt_mask=tgt_mask)
-        return logits, pooled
+        return logits, visual_proj, text_proj
 
 
 # -----------------------------
@@ -196,12 +225,14 @@ def label_smoothing_nll_loss(logits, target, pad_idx, eps=0.1):
     return (loss * non_pad).sum() / non_pad.sum()
 
 
-def contrastive_loss(pose_vec, text_vec, temperature=0.1):
-    pose_vec = F.normalize(pose_vec, dim=-1)
-    text_vec = F.normalize(text_vec, dim=-1)
-    logits = pose_vec @ text_vec.t() / temperature
-    labels = torch.arange(pose_vec.size(0), device=pose_vec.device)
-    return F.cross_entropy(logits, labels)
+def clip_loss(visual_emb, text_emb, temperature=TEMPERATURE):
+    visual_emb = F.normalize(visual_emb, dim=-1)
+    text_emb = F.normalize(text_emb, dim=-1)
+    logits = (visual_emb @ text_emb.t()) / temperature
+    labels = torch.arange(visual_emb.size(0), device=visual_emb.device)
+    loss_v = F.cross_entropy(logits, labels)
+    loss_t = F.cross_entropy(logits.t(), labels)
+    return (loss_v + loss_t) / 2
 
 
 def save_ckpt(out_dir: Path, epoch: int, model: nn.Module, optimizer, tokenizer):
@@ -230,7 +261,7 @@ def train(args):
     vocab_size = tokenizer.vocab_size
 
     model = Sign2TextModel(vocab_size=vocab_size, pad_token_id=pad_id).to(DEVICE)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(BETA1, BETA2))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(BETA1, BETA2), weight_decay=1e-4)
 
     history = []
     best_loss = math.inf
@@ -249,22 +280,23 @@ def train(args):
             tgt_mask = generate_square_subsequent_mask(tgt_inp.size(1), DEVICE)
 
             optimizer.zero_grad()
-            logits, pose_vec = model(frames, tgt_inp, tgt_mask)
+            
+            # Forward pass with text inputs for CLIP
+            logits, visual_proj, text_proj = model(frames, tgt_inp, tgt_mask, text_input_ids=input_ids, text_attn_mask=attn_mask)
+            
+            # Losses
             ce = label_smoothing_nll_loss(logits.reshape(-1, logits.size(-1)), tgt_out.reshape(-1), pad_id, eps=0.1)
+            c_loss = clip_loss(visual_proj, text_proj)
 
-            # simple text CLS pooling for contrastive: mean pooling of token embeddings
-            text_vec = (model.decoder.emb(input_ids) * attn_mask.unsqueeze(-1)).sum(dim=1) / attn_mask.sum(dim=1, keepdim=True)
-            c_loss = contrastive_loss(pose_vec, text_vec)
-
-            loss = ce + args.lambda_contrast * c_loss
+            loss = ce + args.lambda_clip * c_loss
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
             optimizer.step()
 
             global_step += 1
-            pbar.set_postfix({"loss": loss.item(), "ce": ce.item(), "c": c_loss.item()})
+            pbar.set_postfix({"loss": loss.item(), "ce": ce.item(), "clip": c_loss.item()})
 
-        history.append({"epoch": epoch, "loss": float(loss.item()), "ce": float(ce.item()), "contrast": float(c_loss.item())})
+        history.append({"epoch": epoch, "loss": float(loss.item()), "ce": float(ce.item()), "clip": float(c_loss.item())})
         pd.DataFrame(history).to_csv(out_dir / "training_history.csv", index=False)
         save_ckpt(ckpt_dir, epoch, model, optimizer, tokenizer)
         torch.save(model.state_dict(), out_dir / "latest.pt")
@@ -293,7 +325,7 @@ def parse_args():
     ap.add_argument("--max-seq-len", type=int, default=MAX_SEQ_LEN)
     ap.add_argument("--text-max-len", type=int, default=TEXT_MAX_LEN)
     ap.add_argument("--lr", type=float, default=LR)
-    ap.add_argument("--lambda-contrast", type=float, default=LAMBDA_CONTRAST)
+    ap.add_argument("--lambda-clip", type=float, default=LAMBDA_CLIP)
     ap.add_argument("--gcs-cache-dir", default=DEFAULT_GCS_CACHE, help="Local cache directory for GCS downloads")
     return ap.parse_args()
 

@@ -23,7 +23,6 @@ gcloud compute instances create training-gpu \
   --boot-disk-size=200GB \
   --image-family=ubuntu-2204-lts --image-project=ubuntu-os-cloud \
   --maintenance-policy=TERMINATE --restart-on-failure \
-  --service-account=SERVICE_ACCOUNT_EMAIL \
   --scopes=https://www.googleapis.com/auth/cloud-platform \
   --create-disk=auto-delete=yes,device-name=train-data-disk,name=train-data-disk,mode=rw,boot=no
 ```
