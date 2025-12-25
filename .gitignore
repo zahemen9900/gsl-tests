@@ -186,3 +186,4 @@ netlify.toml
 # Misc
 /.expo/
 .DS_Store
+docs/GCP_VMs/logs
