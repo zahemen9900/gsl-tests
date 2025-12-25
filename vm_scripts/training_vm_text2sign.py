@@ -33,23 +33,23 @@ DEFAULT_GLOBAL_STATS = "gs://ghsl-model-artifacts/text2sign/proc/text2sign_globa
 DEFAULT_OUT_DIR = "gs://ghsl-model-artifacts/text2sign/runs"
 DEFAULT_GCS_CACHE = "/tmp/gcs_cache_text2sign"
 MAX_SEQ_LEN = 128
-BATCH_SIZE = 16
+BATCH_SIZE = 64
 NUM_WORKERS = 4
 TEXT_MODEL = "distilbert-base-uncased"
-TEXT_PROJ_DIM = 256
+TEXT_PROJ_DIM = 512
 POSE_DIM = 33 * 4 + 2 * 21 * 3 + 94 * 3
-LATENT_DIM = 64
-HIDDEN_DIM = 256
-NUM_LAYERS = 4
+LATENT_DIM = 128
+HIDDEN_DIM = 512
+NUM_LAYERS = 6
 LENGTH_BINS = list(range(10, 201, 2))
-LR_G = 1e-4
-LR_D = 5e-5
+LR_G = 2e-4
+LR_D = 1e-4
 BETA1, BETA2 = 0.5, 0.9
 LAMBDA_REC = 1.0
 LAMBDA_ADV = 1.0
 LAMBDA_GEO = 0.2
 GRAD_CLIP = 1.0
-EPOCHS = 50
+EPOCHS = 100
 CHECKPOINT_DIR = "checkpoints_text2sign"
 # Landmark indices (MediaPipe) for simple bone-length consistency
 NUM_POSE_LANDMARKS = 33
@@ -188,21 +188,25 @@ class Generator(nn.Module):
         self.length_head = LengthPredictor(text_dim)
         self.style_proj = nn.Linear(latent_dim, hidden_dim)
         self.time_embed = nn.Embedding(MAX_SEQ_LEN, hidden_dim)
-        self.input_proj = nn.Linear(hidden_dim + text_dim, hidden_dim)
-        self.blocks = nn.ModuleList([NATBlock(hidden_dim, heads=4) for _ in range(layers)])
+        # input_proj accounts for style (hidden) + time (hidden) + text (text_dim)
+        self.input_proj = nn.Linear(2 * hidden_dim + text_dim, hidden_dim)
+        self.blocks = nn.ModuleList([NATBlock(hidden_dim, heads=8) for _ in range(layers)])
         self.output = nn.Sequential(nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, pose_dim))
 
     def forward(self, text_ctx, seq_len=None):
         bsz, _, _ = text_ctx.shape
         pooled = text_ctx[:, 0]
         len_logits = self.length_head(pooled)
+        bins = torch.tensor(LENGTH_BINS, device=text_ctx.device)
         if seq_len is not None:
-            target_len = seq_len
+            seq_len = seq_len.to(text_ctx.device)
+            target_idx = torch.bucketize(seq_len, bins) - 1
+            target_idx = target_idx.clamp(0, len(LENGTH_BINS) - 1)
         else:
             probs = torch.softmax(len_logits, dim=-1)
-            target_len = torch.multinomial(probs, num_samples=1).squeeze(-1)
-            target_len = target_len.clamp(0, len(LENGTH_BINS) - 1)
-        target_len_vals = torch.tensor(LENGTH_BINS, device=text_ctx.device)[target_len]
+            target_idx = torch.multinomial(probs, num_samples=1).squeeze(-1)
+            target_idx = target_idx.clamp(0, len(LENGTH_BINS) - 1)
+        target_len_vals = bins[target_idx]
 
         z = torch.randn(bsz, MAX_SEQ_LEN, LATENT_DIM, device=text_ctx.device)
         style = self.style_proj(z)
@@ -219,7 +223,7 @@ class Generator(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, pose_dim=POSE_DIM, base=128):
+    def __init__(self, pose_dim=POSE_DIM, base=256):
         super().__init__()
         self.net = nn.Sequential(
             nn.Conv1d(pose_dim, base, 3, padding=1), nn.LeakyReLU(0.2, inplace=True),
@@ -295,55 +299,96 @@ def train(args):
     opt_G = torch.optim.Adam(G.parameters(), lr=args.lr_g, betas=(BETA1, BETA2))
     opt_D = torch.optim.Adam(D.parameters(), lr=args.lr_d, betas=(BETA1, BETA2))
 
+    scaler = torch.cuda.amp.GradScaler(enabled=DEVICE.type == "cuda")
+
     history = []
     best_g_loss = math.inf
 
     for epoch in range(1, args.epochs + 1):
         G.train(); D.train()
+        # Curriculum phases
+        if epoch <= 15:
+            curr_lambda_adv = 0.0
+            curr_lambda_geo = 0.0
+        elif epoch <= 30:
+            curr_lambda_adv = 0.0
+            curr_lambda_geo = args.lambda_geo
+        else:
+            curr_lambda_adv = args.lambda_adv
+            curr_lambda_geo = args.lambda_geo
+
         pbar = tqdm(loader, desc=f"Epoch {epoch}")
+        total_d = total_g = total_rec = total_geo = 0.0
+        steps = 0
         for frames, input_ids, attn_mask, seq_len in pbar:
-            frames = frames.to(DEVICE)
-            input_ids = input_ids.to(DEVICE)
-            attn_mask = attn_mask.to(DEVICE)
-            seq_len = seq_len.to(DEVICE)
+            frames = frames.to(DEVICE, non_blocking=True)
+            input_ids = input_ids.to(DEVICE, non_blocking=True)
+            attn_mask = attn_mask.to(DEVICE, non_blocking=True)
+            seq_len = seq_len.to(DEVICE, non_blocking=True)
 
             with torch.no_grad():
                 text_ctx = text_encoder(input_ids, attn_mask)
 
-            # Train D
-            opt_D.zero_grad()
-            with torch.no_grad():
-                fake, _, _ = G(text_ctx, seq_len)
-            real_logits = D(frames)
-            fake_logits = D(fake.detach())
-            d_loss, _ = gan_losses(real_logits, fake_logits)
-            d_loss.backward()
-            nn.utils.clip_grad_norm_(D.parameters(), GRAD_CLIP)
-            opt_D.step()
+            # Train D (only if adv active)
+            d_loss_val = 0.0
+            if curr_lambda_adv > 0:
+                opt_D.zero_grad()
+                with torch.cuda.amp.autocast(enabled=DEVICE.type == "cuda"):
+                    with torch.no_grad():
+                        fake, _, _ = G(text_ctx, seq_len)
+                    real_logits = D(frames)
+                    fake_logits = D(fake.detach())
+                    d_loss, _ = gan_losses(real_logits, fake_logits)
+                scaler.scale(d_loss).backward()
+                scaler.unscale_(opt_D)
+                nn.utils.clip_grad_norm_(D.parameters(), GRAD_CLIP)
+                scaler.step(opt_D)
+                scaler.update()
+                d_loss_val = d_loss.item()
 
             # Train G
             opt_G.zero_grad()
-            fake, len_logits, target_len_vals = G(text_ctx, seq_len)
-            fake_logits = D(fake)
-            _, g_gan = gan_losses(real_logits=None, fake_logits=fake_logits)
-            rec = recon_losses(fake, frames)
-            geo = bone_length_consistency(fake)
-            g_loss = args.lambda_rec * rec + args.lambda_adv * g_gan + args.lambda_geo * geo
-            g_loss.backward()
+            with torch.cuda.amp.autocast(enabled=DEVICE.type == "cuda"):
+                fake, len_logits, target_len_vals = G(text_ctx, seq_len)
+                if curr_lambda_adv > 0:
+                    fake_logits = D(fake)
+                    _, g_gan = gan_losses(real_logits=None, fake_logits=fake_logits)
+                else:
+                    g_gan = torch.tensor(0.0, device=DEVICE)
+                rec = recon_losses(fake, frames)
+                geo = bone_length_consistency(fake)
+                g_loss = args.lambda_rec * rec + curr_lambda_adv * g_gan + curr_lambda_geo * geo
+
+            scaler.scale(g_loss).backward()
+            scaler.unscale_(opt_G)
             nn.utils.clip_grad_norm_(G.parameters(), GRAD_CLIP)
-            opt_G.step()
+            scaler.step(opt_G)
+            scaler.update()
 
-            pbar.set_postfix({"d_loss": d_loss.item(), "g_loss": g_loss.item(), "rec": rec.item(), "geo": geo.item()})
+            pbar.set_postfix({"d_loss": d_loss_val, "g_loss": float(g_loss), "rec": float(rec), "geo": float(geo)})
+            total_d += d_loss_val
+            total_g += float(g_loss)
+            total_rec += float(rec)
+            total_geo += float(geo)
+            steps += 1
 
-        save_ckpt(ckpt_dir, epoch, G, D, opt_G, opt_D)
-        history.append({"epoch": epoch, "d_loss": float(d_loss.item()), "g_loss": float(g_loss.item()), "rec": float(rec.item()), "geo": float(geo.item())})
-        if g_loss.item() < best_g_loss:
-            best_g_loss = g_loss.item()
+        if steps > 0:
+            epoch_d = total_d / steps
+            epoch_g = total_g / steps
+            epoch_rec = total_rec / steps
+            epoch_geo = total_geo / steps
+            history.append({"epoch": epoch, "d_loss": epoch_d, "g_loss": epoch_g, "rec": epoch_rec, "geo": epoch_geo})
+        else:
+            epoch_g = math.inf
+        # Save best and latest
+        if epoch_g < best_g_loss:
+            best_g_loss = epoch_g
             torch.save(G.state_dict(), out_dir / "best_generator.pt")
             torch.save(D.state_dict(), out_dir / "best_discriminator.pt")
-        pd.DataFrame(history).to_csv(out_dir / "training_history.csv", index=False)
+            save_ckpt(ckpt_dir, epoch, G, D, opt_G, opt_D)
         torch.save(G.state_dict(), out_dir / "generator_latest.pt")
         torch.save(D.state_dict(), out_dir / "discriminator_latest.pt")
+        pd.DataFrame(history).to_csv(out_dir / "training_history.csv", index=False)
 
         if gcs_out:
             sync_dir_to_gcs(out_dir, gcs_out)

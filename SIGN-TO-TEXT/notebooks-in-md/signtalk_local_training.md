@@ -126,6 +126,13 @@ CFG = {
     "noise_sigma": 0.012,
     "frame_dropout": 0.12,
     "temporal_shift": 4,
+    "prototype_min_clips": 2,
+    "dtw": {
+        "enabled": True,   # Enable DTW re-ranking during inference
+        "topk": 20,        # how many cosine-top candidates to re-rank with DTW
+        "alpha": 0.7,      # weight for cosine vs DTW (refined = alpha*cos + (1-alpha)*dtw)
+        "window": 15       # Sakoe-Chiba window; reduce to speed up if needed
+    },
     "global_stats_path": GLOBAL_STATS_PATH,
     "device": device
 }
@@ -504,6 +511,11 @@ class SignDataset(Dataset):
             frames = self.preprocess(arr)
             
             text = row['sentence']
+            if pd.isna(text):
+                text = ""
+            else:
+                text = str(text)
+
             toks = self.tokenizer(
                 text,
                 max_length=CFG['text_max_len'],
@@ -1483,6 +1495,7 @@ def train_model(model, train_loader, val_loader, epochs=CFG['epochs'], lr=CFG['l
 
 # Run training
 history = train_model(model, train_loader, val_loader)
+trained_model = model
 ```
 
 ---
@@ -1493,6 +1506,7 @@ history = train_model(model, train_loader, val_loader)
 def compute_embeddings(model, loader, device):
     model.eval()
     embs = []
+    kept = 0
     with torch.no_grad():
         for batch in tqdm(loader, desc="Computing Embeddings"):
             if batch[0] is None: continue
@@ -1500,9 +1514,10 @@ def compute_embeddings(model, loader, device):
             # Use encode_visual to get the projection
             visual_proj = model.encode_visual(frames)
             embs.append(visual_proj.cpu())
+            kept += frames.size(0)
             
     if embs:
-        return torch.cat(embs), None
+        return torch.cat(embs), kept
     return None, None
 
 print("\n💾 Generating embeddings for all data...")
@@ -1525,13 +1540,18 @@ all_loader = DataLoader(
     collate_fn=collate_fn
 )
 
-embs, labels = compute_embeddings(trained_model, all_loader, CFG['device'])
+embs, kept = compute_embeddings(model, all_loader, CFG['device'])
 
 if embs is not None:
     embs_np = embs.numpy()
     np.save(os.path.join(OUT_DIR, "embeddings.npy"), embs_np)
 
     mapping_df = all_meta[['video_file', 'feature_path', 'sentence_id', 'sentence', 'category']].copy()
+    if len(mapping_df) != embs_np.shape[0]:
+        trim = min(len(mapping_df), embs_np.shape[0])
+        print(f"⚠️  Trimming mapping to match embeddings: {trim}/{len(mapping_df)}")
+        mapping_df = mapping_df.iloc[:trim].reset_index(drop=True)
+        embs_np = embs_np[:trim]
     mapping_df.to_csv(os.path.join(OUT_DIR, "embeddings_map.csv"), index=False)
 
     print(f"✅ Saved {len(embs_np)} embeddings")
@@ -1608,8 +1628,9 @@ class InferenceEngine:
         else:
             print("ℹ️  No prototypes supplied; falling back to clip embeddings only")
 
-        self.dtw_enabled = cfg['dtw']['enabled'] and fastdtw is not None
-        if cfg['dtw']['enabled'] and fastdtw is None:
+        dtw_cfg = cfg.get('dtw', {})
+        self.dtw_enabled = bool(dtw_cfg.get('enabled', False) and fastdtw is not None)
+        if dtw_cfg.get('enabled', False) and fastdtw is None:
             print("⚠️  fastdtw not installed; DTW re-ranking disabled")
 
     def preprocess_sequence(self, feat_np: np.ndarray) -> np.ndarray:
@@ -1657,8 +1678,27 @@ class InferenceEngine:
         refined_sims = raw_sims.copy()
         dtw_meta = {}
 
-        # DTW disabled for now as model architecture changed (requires frame-level projections)
-        # if self.dtw_enabled: ...
+        # Optional DTW re-ranking on the top-N cosine matches
+        if self.dtw_enabled:
+            dtw_topk = int(self.cfg.get('dtw', {}).get('topk', 20))
+            alpha = float(self.cfg.get('dtw', {}).get('alpha', 0.7))
+            window = self.cfg.get('dtw', {}).get('window', None)
+            # Select candidates to re-rank
+            cand_idx = raw_sims.argsort()[::-1][:max(topk, dtw_topk)]
+            for idx in cand_idx:
+                row = self.mapping.iloc[idx]
+                try:
+                    cand_feat = np.load(row['feature_path'])
+                    cand_seq = self.preprocess_sequence(cand_feat)
+                    _, cand_seq_rep, _ = self.encode(cand_seq)
+                    dist, _ = fastdtw(seq_rep, cand_seq_rep, radius=window) if window is not None else fastdtw(seq_rep, cand_seq_rep)
+                    dtw_score = 1.0 / (1.0 + float(dist))
+                    dtw_meta[int(idx)] = dtw_score
+                    # Blend cosine and DTW
+                    refined_sims[idx] = alpha * refined_sims[idx] + (1 - alpha) * dtw_score
+                except Exception as exc:
+                    # Keep original cosine if DTW fails for this candidate
+                    dtw_meta[int(idx)] = None
 
         logits = refined_sims / self.cfg['temperature']
         probs = torch.softmax(torch.from_numpy(logits), dim=0).numpy()
@@ -1672,6 +1712,7 @@ class InferenceEngine:
             row = self.mapping.iloc[idx]
             sentence_id = int(row['sentence_id'])
             proto_sim = float(np.dot(self.proto_lookup[sentence_id], emb)) if sentence_id in self.proto_lookup else None
+            dtw_score = dtw_meta.get(int(idx)) if dtw_meta else None
             entry = {
                 'rank': rank,
                 'video_file': row['video_file'],
@@ -1683,6 +1724,7 @@ class InferenceEngine:
                 'raw_similarity': float(raw_sims[idx]),
                 'confidence': float(probs[idx]),
                 'proto_similarity': proto_sim,
+                'dtw_score': dtw_score,
             }
             predictions.append(entry)
 

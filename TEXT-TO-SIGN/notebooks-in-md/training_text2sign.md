@@ -40,34 +40,42 @@ print(f"✅ Using device: {DEVICE}")
 
 ```python
 # Data
+# If running in Colab, you might need to prefix with /content/
 PROCESSED_META = "proc/text2sign_processed_metadata.csv"
-FEATURE_DIR = "features/text2sign_pose"
+FEATURE_DIR = "features/text2sign_pose" 
 GLOBAL_STATS = "proc/text2sign_global_stats.npz"
 MAX_SEQ_LEN = 128   # allow longer than preprocessing trim; we can pad
-BATCH_SIZE = 16
-NUM_WORKERS = 4
+BATCH_SIZE = 64     # Increased from 16
+NUM_WORKERS = 4     # Increased for faster data throughput
 
 # Text encoder
 TEXT_MODEL = "distilbert-base-uncased"
 TEXT_DIM = 768
-TEXT_PROJ_DIM = 256
+TEXT_PROJ_DIM = 512 # Increased from 256
 
 # Generator / Discriminator
 POSE_DIM = 33*4 + 2*21*3 + 94*3
-LATENT_DIM = 64
-HIDDEN_DIM = 256
-NUM_LAYERS = 4
+LATENT_DIM = 128    # Increased from 64
+HIDDEN_DIM = 512    # Increased from 256
+NUM_LAYERS = 6      # Increased from 4
 LENGTH_BINS = list(range(10, 201, 2))  # candidate lengths
 
+# Pose Constants (MediaPipe indices)
+NUM_POSE_LANDMARKS = 33
+LEFT_SHOULDER = 11
+RIGHT_SHOULDER = 12
+LEFT_HIP = 23
+RIGHT_HIP = 24
+
 # Optimization
-LR_G = 1e-4
-LR_D = 5e-5
+LR_G = 2e-4         # Scaled for larger batch
+LR_D = 1e-4         # Scaled for larger batch
 BETA1, BETA2 = 0.5, 0.9
 LAMBDA_REC = 1.0
 LAMBDA_ADV = 1.0
 LAMBDA_GEO = 0.2
 GRAD_CLIP = 1.0
-EPOCHS = 50
+EPOCHS = 100        # Increased for deeper model
 CHECKPOINT_DIR = Path("checkpoints_text2sign")
 CHECKPOINT_DIR.mkdir(exist_ok=True, parents=True)
 ```
@@ -95,8 +103,21 @@ class Text2SignDataset(Dataset):
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        feat_path = Path(row['feature_path'])
-        arr = np.load(feat_path)
+        
+        # Fix: Resolve local path by extracting filename and joining with FEATURE_DIR
+        # This handles GCS paths or absolute VM paths (/mnt/disks/data/...) in the CSV
+        raw_path = row.get('feature_path_local') or row.get('feature_path')
+        filename = Path(raw_path).name
+        feat_path = self.feature_dir / filename
+        
+        if not feat_path.exists():
+            # Fallback to raw path if the joined one doesn't exist (e.g. if using absolute paths)
+            feat_path = Path(raw_path)
+            
+        try:
+            arr = np.load(feat_path)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Could not find feature file at {feat_path}. Check FEATURE_DIR in Config.")
 
         # Pad/trim to max_seq_len
         frames = arr
@@ -110,9 +131,31 @@ class Text2SignDataset(Dataset):
         if self.normalize and self.mean is not None:
             frames = (frames - self.mean) / (self.std + 1e-6)
 
-        text = row.get('sentence_text') or row.get('sentence') or ""
-        gloss = row.get('sentence_gloss') or ""
-        full_text = gloss if gloss else text
+        # Text selection: Use augmented variations if available, else fallback to standard columns
+        text_variations = row.get('text_variations')
+        full_text = None
+        
+        if isinstance(text_variations, str) and text_variations.strip().startswith('['):
+            try:
+                variations = json.loads(text_variations)
+                if isinstance(variations, list) and len(variations) > 0:
+                    choice = random.choice(variations)
+                    if isinstance(choice, str):
+                        full_text = choice
+            except:
+                pass
+        
+        if full_text is None:
+            # Fallback to standard columns, handling potential NaN values (floats)
+            for col in ['sentence_text', 'sentence', 'sentence_gloss']:
+                val = row.get(col)
+                if val is not None and not pd.isna(val) and str(val).strip():
+                    full_text = str(val)
+                    break
+        
+        # Final safety check: must be a non-empty string for the tokenizer
+        if not isinstance(full_text, str) or not full_text.strip():
+            full_text = " "
 
         tokens = self.tokenizer(full_text, return_tensors='pt', truncation=True, padding='max_length', max_length=64)
         return {
@@ -132,7 +175,15 @@ def collate_fn(batch):
 
 
 dataset = Text2SignDataset(PROCESSED_META, FEATURE_DIR)
-loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, collate_fn=collate_fn, drop_last=True)
+loader = DataLoader(
+    dataset, 
+    batch_size=BATCH_SIZE, 
+    shuffle=True, 
+    num_workers=NUM_WORKERS, 
+    collate_fn=collate_fn, 
+    drop_last=True,
+    pin_memory=True # Faster transfer to GPU
+)
 print(f"✅ Dataset ready: {len(dataset)} samples")
 ```
 
@@ -178,7 +229,7 @@ class LengthPredictor(nn.Module):
 
 
 class NATBlock(nn.Module):
-    def __init__(self, dim=HIDDEN_DIM, heads=4, ff_mult=4):
+    def __init__(self, dim=HIDDEN_DIM, heads=8, ff_mult=4):
         super().__init__()
         self.attn = nn.MultiheadAttention(dim, heads, batch_first=True)
         self.ff = nn.Sequential(
@@ -203,8 +254,9 @@ class Generator(nn.Module):
         self.length_head = LengthPredictor(text_dim)
         self.style_proj = nn.Linear(latent_dim, hidden_dim)
         self.time_embed = nn.Embedding(MAX_SEQ_LEN, hidden_dim)
-        self.input_proj = nn.Linear(hidden_dim + text_dim, hidden_dim)
-        self.blocks = nn.ModuleList([NATBlock(hidden_dim, heads=4) for _ in range(layers)])
+        # Fix: input_proj must account for style (hidden_dim) + time (hidden_dim) + text (text_dim)
+        self.input_proj = nn.Linear(2 * hidden_dim + text_dim, hidden_dim)
+        self.blocks = nn.ModuleList([NATBlock(hidden_dim, heads=8) for _ in range(layers)])
         self.output = nn.Sequential(
             nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim, pose_dim)
@@ -215,14 +267,19 @@ class Generator(nn.Module):
         pooled = text_ctx[:, 0]  # use CLS/token 0
         len_logits = self.length_head(pooled)
 
+        bins = torch.tensor(LENGTH_BINS, device=text_ctx.device)
+
         # sample length (teacher-forcing with provided seq_len if available)
         if seq_len is not None:
-            target_len = seq_len
+            # Bin seq_len into LENGTH_BINS indices to avoid out-of-range indexing
+            seq_len = seq_len.to(text_ctx.device)
+            target_idx = torch.bucketize(seq_len, bins) - 1
+            target_idx = target_idx.clamp(0, len(LENGTH_BINS) - 1)
         else:
             probs = torch.softmax(len_logits, dim=-1)
-            target_len = torch.multinomial(probs, num_samples=1).squeeze(-1)
-            target_len = target_len.clamp(0, len(LENGTH_BINS)-1)
-        target_len_vals = torch.tensor(LENGTH_BINS, device=text_ctx.device)[target_len]
+            target_idx = torch.multinomial(probs, num_samples=1).squeeze(-1)
+            target_idx = target_idx.clamp(0, len(LENGTH_BINS)-1)
+        target_len_vals = bins[target_idx]
         max_len = MAX_SEQ_LEN
 
         # build time queries
@@ -250,7 +307,7 @@ class Generator(nn.Module):
 
 ```python
 class Discriminator(nn.Module):
-    def __init__(self, pose_dim=POSE_DIM, base=128):
+    def __init__(self, pose_dim=POSE_DIM, base=256): # Increased from 128
         super().__init__()
         self.net = nn.Sequential(
             nn.Conv1d(pose_dim, base, 3, padding=1),
@@ -289,14 +346,20 @@ def recon_losses(pred, target):
 
 
 def gan_losses(real_logits, fake_logits):
-    d_loss = F.relu(1.0 - real_logits).mean() + F.relu(1.0 + fake_logits).mean()
+    if real_logits is not None:
+        d_loss = F.relu(1.0 - real_logits).mean() + F.relu(1.0 + fake_logits).mean()
+    else:
+        d_loss = torch.tensor(0.0, device=fake_logits.device)
     g_loss = -fake_logits.mean()
     return d_loss, g_loss
 
 
 def bone_length_consistency(poses):
     # Simple proxy: variance of pairwise bone lengths (pose coords only x,y,z)
-    coords = poses.view(poses.shape[0], poses.shape[1], NUM_POSE_LANDMARKS, 4)[...,:3]
+    # Body landmarks are the first NUM_POSE_LANDMARKS*4 values
+    body_poses = poses[:, :, :NUM_POSE_LANDMARKS*4].view(poses.shape[0], poses.shape[1], NUM_POSE_LANDMARKS, 4)
+    coords = body_poses[..., :3] # (B, T, NUM_POSE_LANDMARKS, 3)
+    
     # shoulders and hips
     ls = torch.norm(coords[:,:,LEFT_SHOULDER] - coords[:,:,RIGHT_SHOULDER], dim=-1)
     hs = torch.norm(coords[:,:,LEFT_HIP] - coords[:,:,RIGHT_HIP], dim=-1)
@@ -325,67 +388,158 @@ scaler = torch.cuda.amp.GradScaler(enabled=DEVICE.type == 'cuda')
 ## Cell 9 — Training Loop
 
 ```python
-def save_ckpt(epoch):
+def save_ckpt(tag, epoch, g_loss_val):
     torch.save({
         'G': G.state_dict(),
         'D': D.state_dict(),
         'opt_G': opt_G.state_dict(),
         'opt_D': opt_D.state_dict(),
         'epoch': epoch,
-    }, CHECKPOINT_DIR / f"epoch_{epoch}.pt")
+        'g_loss': g_loss_val,
+    }, CHECKPOINT_DIR / f"{tag}.pt")
 
+
+best_g = float('inf')
+history = []
 
 for epoch in range(1, EPOCHS + 1):
     G.train(); D.train()
-    pbar = tqdm(loader, desc=f"Epoch {epoch}")
+    # Ensure loader is defined (from Cell 3)
+    if 'loader' not in globals():
+        print("❌ Error: 'loader' not found. Did you run Cell 3?")
+        break
+    
+    # Curriculum Learning Schedule
+    # Phase 1: Warmup (Reconstruction only) -> Avoids "D overpowering G" early
+    # Phase 2: Geometric (Rec + Geo) -> Fixes bone stretching
+    # Phase 3: Adversarial (Full) -> Adds realism
+    if epoch <= 15:
+        curr_lambda_adv = 0.0
+        curr_lambda_geo = 0.0
+        phase = "Warmup (Rec Only)"
+    elif epoch <= 30:
+        curr_lambda_adv = 0.0
+        curr_lambda_geo = LAMBDA_GEO
+        phase = "Stabilization (Rec+Geo)"
+    else:
+        curr_lambda_adv = LAMBDA_ADV
+        curr_lambda_geo = LAMBDA_GEO
+        phase = "Adversarial (Full)"
+
+    pbar = tqdm(loader, desc=f"Epoch {epoch} [{phase}]")
+    total_d = 0.0
+    total_g = 0.0
+    total_rec = 0.0
+    total_geo = 0.0
+    steps = 0
     for frames, input_ids, attn_mask, seq_len in pbar:
-        frames = frames.to(DEVICE)
-        input_ids = input_ids.to(DEVICE)
-        attn_mask = attn_mask.to(DEVICE)
-        seq_len = seq_len.to(DEVICE)
+        frames = frames.to(DEVICE, non_blocking=True)
+        input_ids = input_ids.to(DEVICE, non_blocking=True)
+        attn_mask = attn_mask.to(DEVICE, non_blocking=True)
+        seq_len = seq_len.to(DEVICE, non_blocking=True)
 
         with torch.no_grad():
             text_ctx = text_encoder(input_ids, attn_mask)
 
-        # --- Train Discriminator ---
-        opt_D.zero_grad()
-        with torch.no_grad():
-            fake, _, _ = G(text_ctx, seq_len)
-        real_logits = D(frames)
-        fake_logits = D(fake.detach())
-        d_loss, _ = gan_losses(real_logits, fake_logits)
-        d_loss.backward()
-        nn.utils.clip_grad_norm_(D.parameters(), GRAD_CLIP)
-        opt_D.step()
+        # --- Train Discriminator (Only in Adversarial Phase) ---
+        d_loss_val = 0.0
+        if curr_lambda_adv > 0:
+            opt_D.zero_grad()
+            with torch.amp.autocast('cuda', enabled=DEVICE.type == 'cuda'):
+                with torch.no_grad():
+                    fake, _, _ = G(text_ctx, seq_len)
+                real_logits = D(frames)
+                fake_logits = D(fake.detach())
+                d_loss, _ = gan_losses(real_logits, fake_logits)
+            
+            scaler.scale(d_loss).backward()
+            scaler.unscale_(opt_D)
+            nn.utils.clip_grad_norm_(D.parameters(), GRAD_CLIP)
+            scaler.step(opt_D)
+            scaler.update()
+            d_loss_val = d_loss.item()
 
         # --- Train Generator ---
         opt_G.zero_grad()
-        fake, len_logits, target_len_vals = G(text_ctx, seq_len)
-        fake_logits = D(fake)
-        _, g_gan = gan_losses(real_logits=None, fake_logits=fake_logits)  # g part only
+        with torch.amp.autocast('cuda', enabled=DEVICE.type == 'cuda'):
+            fake, len_logits, target_len_vals = G(text_ctx, seq_len)
+            
+            # GAN loss (only if active)
+            if curr_lambda_adv > 0:
+                fake_logits = D(fake)
+                _, g_gan = gan_losses(real_logits=None, fake_logits=fake_logits)
+            else:
+                g_gan = torch.tensor(0.0, device=DEVICE)
 
-        rec = recon_losses(fake, frames)
-        geo = bone_length_consistency(fake)
+            rec = recon_losses(fake, frames)
+            geo = bone_length_consistency(fake)
 
-        g_loss = LAMBDA_REC * rec + LAMBDA_ADV * g_gan + LAMBDA_GEO * geo
-        g_loss.backward()
+            g_loss = LAMBDA_REC * rec + curr_lambda_adv * g_gan + curr_lambda_geo * geo
+        
+        scaler.scale(g_loss).backward()
+        scaler.unscale_(opt_G)
         nn.utils.clip_grad_norm_(G.parameters(), GRAD_CLIP)
-        opt_G.step()
+        scaler.step(opt_G)
+        scaler.update()
 
         pbar.set_postfix({
-            'd_loss': d_loss.item(),
-            'g_loss': g_loss.item(),
-            'rec': rec.item(),
-            'geo': geo.item(),
+            'd_loss': f"{d_loss_val:.4f}",
+            'g_loss': f"{g_loss.item():.4f}",
+            'rec': f"{rec.item():.4f}",
+            'geo': f"{geo.item():.4f}",
         })
+        total_d += float(d_loss_val)
+        total_g += float(g_loss.item())
+        total_rec += float(rec.item())
+        total_geo += float(geo.item())
+        steps += 1
+    # Save best (lowest g_loss) and always keep latest
+    if g_loss.item() < best_g:
+        best_g = g_loss.item()
+        save_ckpt("best", epoch, best_g)
+        print(f"💾 Saved BEST checkpoint at epoch {epoch} (g_loss={best_g:.4f})")
+    save_ckpt("latest", epoch, g_loss.item())
+    print(f"💾 Saved latest checkpoint epoch {epoch}")
+    if steps > 0:
+        history.append({
+            'epoch': epoch,
+            'd_loss': total_d / steps,
+            'g_loss': total_g / steps,
+            'rec': total_rec / steps,
+            'geo': total_geo / steps,
+        })
+```
+## Cell 10 — Quick Training Curves
 
-    save_ckpt(epoch)
-    print(f"💾 Saved checkpoint epoch {epoch}")
+```python
+import matplotlib.pyplot as plt
+
+if history:
+    epochs = [h['epoch'] for h in history]
+    plt.figure(figsize=(10,4))
+    plt.subplot(1,2,1)
+    plt.plot(epochs, [h['g_loss'] for h in history], label='G Loss')
+    plt.plot(epochs, [h['d_loss'] for h in history], label='D Loss')
+    plt.title('GAN Losses')
+    plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.legend(); plt.grid(alpha=0.3)
+
+    plt.subplot(1,2,2)
+    plt.plot(epochs, [h['rec'] for h in history], label='Reconstruction')
+    plt.plot(epochs, [h['geo'] for h in history], label='Geometry')
+    plt.title('Reconstruction / Geometry')
+    plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.legend(); plt.grid(alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+else:
+    print("No history captured; run training cell first.")
 ```
 
 ---
 
-## Cell 10 — Inference / Sampling
+## Cell 11 — Inference / Sampling
+
+---
 
 ```python
 @torch.no_grad()
@@ -407,7 +561,7 @@ print(samples.shape)
 
 ---
 
-## Cell 11 — Visualization: Generated Trajectory Quick Look
+## Cell 12 — Visualization: Generated Trajectory Quick Look
 
 ```python
 import matplotlib.pyplot as plt
