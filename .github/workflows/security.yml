@@ -80,3 +80,14 @@ jobs:
 
       - name: Run bandit
         run: bandit -r backend vm_scripts TEXT-TO-SIGN real_time_inference.py -lll -iii
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Security Scan Summary";
+            echo "- Status: ${{ job.status }}";
+            echo "- pip-audit: backend/requirements.txt";
+            echo "- npm audit: frontend (high+)";
+            echo "- bandit: backend vm_scripts TEXT-TO-SIGN real_time_inference.py";
+          } >> "$GITHUB_STEP_SUMMARY"

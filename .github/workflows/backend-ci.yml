@@ -42,3 +42,14 @@ jobs:
       - name: Tests (pytest)
         run: |
           pytest backend vm_scripts TEXT-TO-SIGN --maxfail=1 --disable-warnings -q
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Backend CI Summary";
+            echo "- Status: ${{ job.status }}";
+            echo "- Python: 3.10";
+            echo "- Lint: ruff check backend vm_scripts TEXT-TO-SIGN real_time_inference.py";
+            echo "- Tests: pytest backend vm_scripts TEXT-TO-SIGN --maxfail=1 --disable-warnings -q";
+          } >> "$GITHUB_STEP_SUMMARY"

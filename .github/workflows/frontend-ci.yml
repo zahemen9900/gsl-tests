@@ -31,3 +31,13 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Frontend CI Summary";
+            echo "- Status: ${{ job.status }}";
+            echo "- Node: 20";
+            echo "- Steps: npm ci; npm run build";
+          } >> "$GITHUB_STEP_SUMMARY"
